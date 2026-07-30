@@ -211,7 +211,7 @@ fn is_absolute_like(path: &str) -> bool {
     (bytes.len() >= 2 && bytes[1] == b':') || Path::new(path).is_absolute()
 }
 
-fn is_path_within(root: &Path, candidate: &Path) -> bool {
+pub(crate) fn is_path_within(root: &Path, candidate: &Path) -> bool {
     #[cfg(windows)]
     {
         let root_key = path_key(root);

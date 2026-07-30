@@ -1,6 +1,8 @@
+mod detection;
 mod projects;
 mod runtime;
 
+use detection::detect_project_services;
 use projects::{
     add_project, add_service, list_projects, list_services, open_project_folder, remove_project,
     remove_service, rename_project, resolve_service_directory, update_service, ProjectStore,
@@ -39,7 +41,8 @@ pub fn run() {
             stop_service,
             get_service_runtime,
             get_service_logs,
-            clear_service_logs
+            clear_service_logs,
+            detect_project_services
         ])
         .build(tauri::generate_context!())
         .expect("error while building Server Dashboard");

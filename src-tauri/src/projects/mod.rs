@@ -12,6 +12,7 @@ pub(crate) use error::{CommandError, ProjectError};
 #[cfg(test)]
 pub(crate) use model::ServiceInput;
 pub(crate) use model::{ServiceLaunchSpec, ServiceStartPreview};
+pub(crate) use paths::{is_path_within, normalize_existing_directory};
 pub(crate) use store::ProjectStore;
 
 use std::sync::{Mutex, MutexGuard};
