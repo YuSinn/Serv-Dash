@@ -1,6 +1,11 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
 import { getErrorMessage } from './api';
+import {
+  validateServiceCommand,
+  validateServiceName,
+  validateServiceWorkingDirectory,
+} from './serviceFieldValidation';
 import type { ServiceDefinition, ServiceInput } from './types';
 
 interface ServiceDialogProps {
@@ -43,10 +48,9 @@ function validateForm(
 ): FieldErrors {
   const errors: FieldErrors = {};
   const name = form.name.trim();
-  if (!name) {
-    errors.name = 'Service name is required.';
-  } else if (name.length > 120) {
-    errors.name = 'Use at most 120 characters.';
+  const nameError = validateServiceName(form.name);
+  if (nameError) {
+    errors.name = nameError;
   } else if (
     services.some(
       (service) =>
@@ -57,22 +61,14 @@ function validateForm(
     errors.name = 'A service with this name is already configured.';
   }
 
-  const directory = form.workingDirectory.trim();
-  if (!directory) {
-    errors.workingDirectory = "Working directory is required. Use '.' for the root.";
-  } else if (/^(?:[a-z]:|[\\/])/i.test(directory)) {
-    errors.workingDirectory = 'Use a path relative to the project root.';
-  } else if (directory.split(/[\\/]+/).includes('..')) {
-    errors.workingDirectory = "Parent components ('..') are not allowed.";
+  const workingDirectoryError = validateServiceWorkingDirectory(form.workingDirectory);
+  if (workingDirectoryError) {
+    errors.workingDirectory = workingDirectoryError;
   }
 
-  const command = form.command.trim();
-  if (!command) {
-    errors.command = 'Command is required.';
-  } else if (command.length > 4096) {
-    errors.command = 'Use at most 4096 characters.';
-  } else if (/\0|[\r\n]/.test(command)) {
-    errors.command = 'NUL characters and line breaks are not allowed.';
+  const commandError = validateServiceCommand(form.command);
+  if (commandError) {
+    errors.command = commandError;
   }
 
   const portText = form.expectedPort.trim();
