@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  DetectionResult,
   Project,
   ServiceDefinition,
   ServiceInput,
@@ -100,6 +101,10 @@ export function openProjectFolder(projectId: string): Promise<void> {
 
 export function listServices(projectId: string): Promise<ServiceDefinition[]> {
   return invokeCommand<ServiceDefinition[]>('list_services', { projectId });
+}
+
+export function detectProjectServices(projectId: string): Promise<DetectionResult> {
+  return invokeCommand<DetectionResult>('detect_project_services', { projectId });
 }
 
 export function addService(projectId: string, service: ServiceInput): Promise<ServiceDefinition[]> {

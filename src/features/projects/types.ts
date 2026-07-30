@@ -26,6 +26,53 @@ export interface Project {
   services: ServiceDefinition[];
 }
 
+export type DetectionSourceKind = 'npmScript' | 'powerShell' | 'cmd' | 'bat';
+
+export type DetectionWarningKind =
+  | 'invalidPackageJson'
+  | 'emptyNpmScript'
+  | 'unsafeNpmScriptName'
+  | 'nonUtf8Path'
+  | 'symlinkOrJunctionSkipped'
+  | 'permissionDenied'
+  | 'fileDisappeared'
+  | 'depthLimitReached'
+  | 'directoryLimitReached'
+  | 'packageJsonLimitReached'
+  | 'suggestionLimitReached'
+  | 'packageJsonTooLarge'
+  | 'unsafeWindowsScriptName'
+  | 'matchesRegisteredService'
+  | 'windowsScriptLimitReached';
+
+export interface DetectionWarning {
+  kind: DetectionWarningKind;
+  message: string;
+  path: string | null;
+}
+
+export interface ServiceSuggestion {
+  stableId: string;
+  displayName: string;
+  sourceKind: DetectionSourceKind;
+  sourcePath: string;
+  workingDirectory: string;
+  command: string;
+  reason: string;
+  defaultSelected: boolean;
+  editable: boolean;
+  warnings: DetectionWarning[];
+}
+
+export interface DetectionResult {
+  projectId: string;
+  projectRoot: string;
+  suggestions: ServiceSuggestion[];
+  warnings: DetectionWarning[];
+  scannedDirectories: number;
+  truncated: boolean;
+}
+
 export type ServiceRuntimeStatus =
   'stopped' | 'starting' | 'running' | 'stopping' | 'exited' | 'failed';
 
