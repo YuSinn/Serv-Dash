@@ -1,14 +1,19 @@
-use super::commands::detect_registered_project;
+use super::commands::{detect_registered_project, detect_registered_project_with_config};
 use super::detection_test_support::{
     assert_path_absent, registered_state, scan, suggestion, warning_count, TempFixture,
 };
 use super::model::{DetectionWarning, DetectionWarningKind, SourceKind};
 use super::scanner::{
-    scan_project, ScanConfig, MAX_DEPTH, MAX_DIRECTORIES, MAX_PACKAGE_JSON_BYTES,
-    MAX_PACKAGE_JSON_FILES, MAX_SUGGESTIONS,
+    push_suggestion, scan_project, ScanConfig, MAX_DEPTH, MAX_DIRECTORIES, MAX_PACKAGE_JSON_BYTES,
+    MAX_PACKAGE_JSON_FILES, MAX_SUGGESTIONS, MAX_WINDOWS_SCRIPTS,
 };
-use std::fs;
+use super::windows_scripts::inspect_windows_script;
+use crate::projects::ServiceInput;
+use std::collections::HashSet;
+use std::fs::{self, FileTimes, OpenOptions};
 use std::io;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 #[cfg(windows)]
 use super::scanner::has_reparse_attribute;
@@ -32,6 +37,11 @@ fn scanner_is_iterative_and_deterministic_across_root_and_nested_directories() {
         .collect();
 
     assert_eq!(first, second);
+    assert!(first
+        .suggestions
+        .iter()
+        .filter(|item| item.source_kind != SourceKind::NpmScript)
+        .all(|item| !item.default_selected && item.editable));
     assert_eq!(
         commands,
         [
@@ -160,6 +170,7 @@ fn production_scan_limits_have_the_required_values() {
     assert_eq!(MAX_DEPTH, 5);
     assert_eq!(MAX_DIRECTORIES, 2_000);
     assert_eq!(MAX_PACKAGE_JSON_FILES, 200);
+    assert_eq!(MAX_WINDOWS_SCRIPTS, 200);
     assert_eq!(MAX_SUGGESTIONS, 500);
     assert_eq!(MAX_PACKAGE_JSON_BYTES, 1024 * 1024);
 }
@@ -226,6 +237,547 @@ fn fail_nested_packages_before_read(path: &std::path::Path) -> io::Result<()> {
         Some("denied-package") => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
         _ => Ok(()),
     }
+}
+
+fn remove_windows_script_before_second_metadata(path: &std::path::Path) -> io::Result<()> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("z-gone.cmd") {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+type ScanGate = (mpsc::Sender<()>, mpsc::Receiver<()>);
+static LOCK_SCAN_GATE: OnceLock<Mutex<Option<ScanGate>>> = OnceLock::new();
+
+fn block_first_scan_read(path: &std::path::Path) -> io::Result<()> {
+    let _ = path;
+    let channels = LOCK_SCAN_GATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| io::Error::other("scan gate poisoned"))?
+        .take();
+    if let Some((entered, release)) = channels {
+        entered
+            .send(())
+            .map_err(|_| io::Error::other("scan gate receiver disappeared"))?;
+        release
+            .recv()
+            .map_err(|_| io::Error::other("scan gate sender disappeared"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn windows_scripts_use_exact_commands_fields_extensions_and_deterministic_order() {
+    let fixture = TempFixture::new();
+    fixture.write("Alpha.CMD", "ignored");
+    fixture.write("package.json", r#"{"scripts":{"dev":"ignored"}}"#);
+    fixture.write("run.BAT", "ignored");
+    fixture.write("setup.PS1", "ignored");
+    fixture.write("tools/My deploy.Ps1", "ignored");
+    fixture.write("tools/déployer-1_test.cmd", "ignored");
+    let first = scan(&fixture, "project-a", ScanConfig::default());
+    let second = scan(&fixture, "project-a", ScanConfig::default());
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .suggestions
+            .iter()
+            .map(|item| item.source_path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Alpha.CMD",
+            "package.json",
+            "run.BAT",
+            "setup.PS1",
+            "tools/déployer-1_test.cmd",
+            "tools/My deploy.Ps1"
+        ]
+    );
+    let cmd_command = format!("{}.\\Alpha.CMD{}", char::from(34), char::from(34));
+    let cmd = suggestion(&first, &cmd_command);
+    assert_eq!(cmd.source_kind, SourceKind::Cmd);
+    assert_eq!(cmd.working_directory, ".");
+    assert_eq!(cmd.display_name, "CMD: Alpha.CMD");
+    assert!(!cmd.default_selected);
+    assert!(cmd.editable);
+
+    let bat_command = format!("{}.\\run.BAT{}", char::from(34), char::from(34));
+    let bat = suggestion(&first, &bat_command);
+    assert_eq!(bat.source_kind, SourceKind::Bat);
+    assert_eq!(bat.display_name, "BAT: run.BAT");
+
+    let powershell_command = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}.\\setup.PS1{}",
+        char::from(34),
+        char::from(34)
+    );
+    let powershell = suggestion(&first, &powershell_command);
+    assert_eq!(powershell.source_kind, SourceKind::PowerShell);
+    assert_eq!(powershell.display_name, "PowerShell: setup.PS1");
+    assert!(powershell.reason.contains("Windows PowerShell script"));
+
+    let nested_command = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}.\\My deploy.Ps1{}",
+        char::from(34),
+        char::from(34)
+    );
+    let nested = suggestion(&first, &nested_command);
+    assert_eq!(nested.working_directory, "tools");
+    assert_eq!(nested.source_path, "tools/My deploy.Ps1");
+    assert_eq!(
+        nested.display_name,
+        format!(
+            "tools {} PowerShell: My deploy.Ps1",
+            char::from_u32(8212).expect("em dash should be valid")
+        )
+    );
+    let unicode_command = format!("{}.\\déployer-1_test.cmd{}", char::from(34), char::from(34));
+    assert_eq!(
+        suggestion(&first, &unicode_command).source_kind,
+        SourceKind::Cmd
+    );
+}
+
+#[test]
+fn windows_script_contents_are_not_read_or_executed_and_exclusions_apply() {
+    let fixture = TempFixture::new();
+    let ps_marker = fixture.path("powershell.marker");
+    let cmd_marker = fixture.path("cmd.marker");
+    let bat_marker = fixture.path("bat.marker");
+    fixture.write_bytes("opaque.ps1", &[0, 0xff, 0xfe, 0xfd]);
+    fixture.write(
+        "marker.ps1",
+        &format!(
+            "Set-Content -LiteralPath '{}' -Value executed",
+            ps_marker.display()
+        ),
+    );
+    fixture.write(
+        "marker.cmd",
+        &format!("@echo executed>{}", cmd_marker.display()),
+    );
+    fixture.write(
+        "marker.bat",
+        &format!("@echo executed>{}", bat_marker.display()),
+    );
+    for directory in ["node_modules", "dist", "target"] {
+        fixture.write(&format!("{directory}/ignored.ps1"), "ignored");
+        fixture.write(&format!("{directory}/ignored.cmd"), "ignored");
+        fixture.write(&format!("{directory}/ignored.bat"), "ignored");
+    }
+
+    let result = scan(&fixture, "p", ScanConfig::default());
+    assert_eq!(result.suggestions.len(), 4);
+    assert!(result
+        .suggestions
+        .iter()
+        .all(|item| !item.source_path.contains('/')));
+    assert!(result
+        .suggestions
+        .iter()
+        .any(|item| item.source_path == "opaque.ps1"));
+    assert_path_absent(&ps_marker);
+    assert_path_absent(&cmd_marker);
+    assert_path_absent(&bat_marker);
+}
+
+#[test]
+#[cfg(windows)]
+fn locked_windows_script_proves_scanner_does_not_read_content() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::LockFile;
+
+    let fixture = TempFixture::new();
+    let script_path = fixture.write_bytes("locked.cmd", &[0xff; 32]);
+    let locked_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&script_path)
+        .expect("test script should open");
+    let locked = unsafe { LockFile(locked_file.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX) };
+    assert_ne!(locked, 0, "test should lock script contents");
+    assert!(fs::read(&script_path).is_err());
+
+    let result = scan(&fixture, "p", ScanConfig::default());
+    assert_eq!(result.suggestions.len(), 1);
+    assert_eq!(result.suggestions[0].source_path, "locked.cmd");
+    drop(locked_file);
+}
+
+#[test]
+fn windows_and_global_suggestion_limits_are_independent() {
+    let fixture = TempFixture::new();
+    fixture.write("a.cmd", "ignored");
+    fixture.write("b.cmd", "ignored");
+    fixture.write("c.cmd", "ignored");
+    fixture.write("package.json", r#"{"scripts":{"dev":"ignored"}}"#);
+
+    let windows_limited = scan(
+        &fixture,
+        "p",
+        ScanConfig {
+            max_windows_scripts: 1,
+            ..ScanConfig::default()
+        },
+    );
+    assert_eq!(
+        windows_limited
+            .suggestions
+            .iter()
+            .map(|item| item.source_path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.cmd", "package.json"]
+    );
+    assert_eq!(
+        warning_count(
+            &windows_limited,
+            DetectionWarningKind::WindowsScriptLimitReached
+        ),
+        1
+    );
+    assert!(windows_limited.truncated);
+
+    let globally_limited = scan(
+        &fixture,
+        "p",
+        ScanConfig {
+            max_suggestions: 1,
+            ..ScanConfig::default()
+        },
+    );
+    assert_eq!(globally_limited.suggestions.len(), 1);
+    assert_eq!(
+        warning_count(
+            &globally_limited,
+            DetectionWarningKind::SuggestionLimitReached
+        ),
+        1
+    );
+    assert_eq!(
+        warning_count(
+            &globally_limited,
+            DetectionWarningKind::WindowsScriptLimitReached
+        ),
+        0
+    );
+    assert!(globally_limited.truncated);
+}
+
+#[test]
+fn windows_script_name_policy_rejects_shell_metacharacters() {
+    for unsafe_character in [
+        '"', '\r', '\n', '\0', '&', '|', '<', '>', '^', '%', '!', '(', ')', '\t', '\\', '$',
+    ] {
+        let file_name = format!("bad{unsafe_character}name.cmd");
+        let inspection = inspect_windows_script("p", SourceKind::Cmd, &file_name, ".", &file_name);
+        assert!(
+            inspection.suggestion.is_none(),
+            "accepted {unsafe_character:?}"
+        );
+        assert_eq!(inspection.warnings.len(), 1);
+        assert_eq!(
+            inspection.warnings[0].kind,
+            DetectionWarningKind::UnsafeWindowsScriptName
+        );
+        assert_eq!(
+            inspection.warnings[0].path.as_deref(),
+            Some(file_name.as_str())
+        );
+    }
+
+    let fixture = TempFixture::new();
+    fixture.write("bad&name.cmd", "ignored");
+    let result = scan(&fixture, "p", ScanConfig::default());
+    assert!(result.suggestions.is_empty());
+    assert!(!result.truncated);
+    assert_eq!(
+        warning_count(&result, DetectionWarningKind::UnsafeWindowsScriptName),
+        1
+    );
+    assert_eq!(result.warnings[0].path.as_deref(), Some("bad&name.cmd"));
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_script_symlink_is_skipped_without_reading_its_target() {
+    use std::os::windows::fs::symlink_file;
+
+    let project = TempFixture::new();
+    let outside = TempFixture::new();
+    outside.write("outside.cmd", "ignored");
+    if let Err(error) = symlink_file(outside.path("outside.cmd"), project.path("linked.cmd")) {
+        eprintln!("symlink test unavailable: {error}");
+        return;
+    }
+
+    let result = scan(&project, "p", ScanConfig::default());
+    assert!(result.suggestions.is_empty());
+    assert!(!result.truncated);
+    assert_eq!(
+        warning_count(&result, DetectionWarningKind::SymlinkOrJunctionSkipped),
+        1
+    );
+}
+
+#[test]
+fn disappearing_identified_windows_script_truncates_and_keeps_prior_suggestions() {
+    let fixture = TempFixture::new();
+    fixture.write("package.json", r#"{"scripts":{"dev":"ignored"}}"#);
+    fixture.write("z-gone.cmd", "ignored");
+
+    let result = scan(
+        &fixture,
+        "p",
+        ScanConfig {
+            before_read: Some(remove_windows_script_before_second_metadata),
+            ..ScanConfig::default()
+        },
+    );
+    assert!(result.truncated);
+    assert_eq!(result.suggestions.len(), 1);
+    assert_eq!(result.suggestions[0].command, "npm run -- dev");
+    assert_eq!(
+        warning_count(&result, DetectionWarningKind::FileDisappeared),
+        1
+    );
+    assert_eq!(result.warnings[0].path.as_deref(), Some("z-gone.cmd"));
+}
+
+#[test]
+fn windows_stable_ids_cover_project_path_kind_and_ignore_file_metadata() {
+    let fixture = TempFixture::new();
+    fixture.write("same.ps1", "first content");
+    fixture.write("same.cmd", "first content");
+    fixture.write("same.bat", "first content");
+    fixture.write("nested/same.ps1", "first content");
+
+    let first = scan(&fixture, "project-a", ScanConfig::default());
+    let second = scan(&fixture, "project-a", ScanConfig::default());
+    let other_project = scan(&fixture, "project-b", ScanConfig::default());
+    let id = |result: &super::model::DetectionResult, path: &str| {
+        result
+            .suggestions
+            .iter()
+            .find(|item| item.source_path == path)
+            .expect("Windows suggestion should exist")
+            .stable_id
+            .clone()
+    };
+
+    let root_ps = id(&first, "same.ps1");
+    assert_eq!(root_ps, id(&second, "same.ps1"));
+    assert_ne!(root_ps, id(&first, "nested/same.ps1"));
+    assert_ne!(root_ps, id(&first, "same.cmd"));
+    assert_ne!(root_ps, id(&first, "same.bat"));
+    assert_ne!(root_ps, id(&other_project, "same.ps1"));
+
+    let script_path = fixture.write("same.ps1", "changed content");
+    OpenOptions::new()
+        .write(true)
+        .open(&script_path)
+        .expect("script should open for the test only")
+        .set_times(
+            FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+        )
+        .expect("test should set the timestamp");
+    let changed = scan(&fixture, "project-a", ScanConfig::default());
+    assert_eq!(root_ps, id(&changed, "same.ps1"));
+}
+
+#[test]
+fn duplicate_stable_ids_keep_the_first_suggestion_without_truncating() {
+    let fixture = TempFixture::new();
+    fixture.write("package.json", r#"{"scripts":{"dev":"ignored"}}"#);
+    let mut result = scan(&fixture, "p", ScanConfig::default());
+    let first = result.suggestions.remove(0);
+    let mut duplicate = first.clone();
+    duplicate.display_name = "duplicate should be discarded".to_owned();
+    result.warnings.clear();
+    result.truncated = false;
+    let mut stable_ids = HashSet::new();
+
+    assert!(push_suggestion(
+        &mut result,
+        &mut stable_ids,
+        first.clone(),
+        MAX_SUGGESTIONS,
+        None,
+    ));
+    assert!(push_suggestion(
+        &mut result,
+        &mut stable_ids,
+        duplicate,
+        MAX_SUGGESTIONS,
+        None,
+    ));
+    assert_eq!(result.suggestions, [first]);
+    assert!(!result.truncated);
+}
+
+#[test]
+#[cfg(windows)]
+fn registered_services_match_all_source_kinds_without_mutating_the_store() {
+    let fixture = TempFixture::new();
+    let (state, project_id, data_file) = registered_state(&fixture);
+    let npm_marker = fixture.path("npm.marker");
+    let ps_marker = fixture.path("powershell.marker");
+    let cmd_marker = fixture.path("cmd.marker");
+    let bat_marker = fixture.path("bat.marker");
+    fixture.write(
+        "project/package.json",
+        &serde_json::json!({
+            "scripts": {
+                "dev": format!("echo executed>{}", npm_marker.display()),
+                "build": "ignored"
+            }
+        })
+        .to_string(),
+    );
+    fixture.write(
+        "project/launch.ps1",
+        &format!(
+            "Set-Content -LiteralPath '{}' -Value executed",
+            ps_marker.display()
+        ),
+    );
+    fixture.write("project/fresh.ps1", "ignored");
+    fixture.write(
+        "project/tools/deploy.CMD",
+        &format!("@echo executed>{}", cmd_marker.display()),
+    );
+    fixture.write(
+        "project/run.bat",
+        &format!("@echo executed>{}", bat_marker.display()),
+    );
+    fixture.write("project/node_modules/ignored.cmd", "ignored");
+
+    let ps_command = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}.\\launch.ps1{}",
+        char::from(34),
+        char::from(34)
+    );
+    let cmd_command = format!("{}.\\deploy.CMD{}", char::from(34), char::from(34));
+    let bat_command = format!("{}.\\run.bat{}", char::from(34), char::from(34));
+    let add_service = |name: &str, working_directory: &str, command: &str| {
+        state
+            .store()
+            .expect("store lock should be available")
+            .add_service(
+                &project_id,
+                &ServiceInput {
+                    name: name.to_owned(),
+                    working_directory: working_directory.to_owned(),
+                    command: command.to_owned(),
+                    expected_port: None,
+                    local_url: None,
+                },
+            )
+            .expect("service should register");
+    };
+    add_service("npm dev", "./", " npm run -- dev ");
+    add_service("duplicate npm dev", ".", "npm run -- dev");
+    add_service("PowerShell", ".", &ps_command);
+    add_service("CMD", "TOOLS\\.", &cmd_command);
+    add_service("BAT", ".", &bat_command);
+
+    let before = fs::read(&data_file).expect("store should be readable");
+    let result =
+        tauri::async_runtime::block_on(detect_registered_project(project_id.clone(), &state))
+            .expect("registered project should scan");
+    let after = fs::read(&data_file).expect("store should remain readable");
+
+    assert_eq!(result.suggestions.len(), 6);
+    assert_eq!(before, after);
+    let matches_registered = |item: &super::model::ServiceSuggestion| {
+        item.warnings
+            .iter()
+            .filter(|warning| warning.kind == DetectionWarningKind::MatchesRegisteredService)
+            .count()
+    };
+    let npm = suggestion(&result, "npm run -- dev");
+    assert!(!npm.default_selected);
+    assert_eq!(matches_registered(npm), 1);
+    assert_eq!(matches_registered(suggestion(&result, &ps_command)), 1);
+    assert_eq!(matches_registered(suggestion(&result, &cmd_command)), 1);
+    assert_eq!(matches_registered(suggestion(&result, &bat_command)), 1);
+
+    let fresh = result
+        .suggestions
+        .iter()
+        .find(|item| item.source_path == "fresh.ps1")
+        .expect("unmatched PowerShell suggestion should exist");
+    assert_eq!(matches_registered(fresh), 0);
+    assert_eq!(
+        matches_registered(suggestion(&result, "npm run -- build")),
+        0
+    );
+    assert_eq!(
+        warning_count(&result, DetectionWarningKind::MatchesRegisteredService),
+        0
+    );
+    assert!(result
+        .suggestions
+        .iter()
+        .all(|item| !item.source_path.starts_with("node_modules/")));
+    assert_path_absent(&npm_marker);
+    assert_path_absent(&ps_marker);
+    assert_path_absent(&cmd_marker);
+    assert_path_absent(&bat_marker);
+}
+
+#[test]
+fn detection_releases_the_store_lock_before_scanning() {
+    let fixture = TempFixture::new();
+    let (state, project_id, _) = registered_state(&fixture);
+    fixture.write("project/package.json", r#"{"scripts":{"dev":"ignored"}}"#);
+    let state = Arc::new(state);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *LOCK_SCAN_GATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("scan gate should lock") = Some((entered_tx, release_rx));
+
+    let detection_state = Arc::clone(&state);
+    let detection = std::thread::spawn(move || {
+        tauri::async_runtime::block_on(detect_registered_project_with_config(
+            project_id,
+            &detection_state,
+            ScanConfig {
+                before_read: Some(block_first_scan_read),
+                ..ScanConfig::default()
+            },
+        ))
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("scanner should enter its blocking hook");
+
+    let lock_state = Arc::clone(&state);
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let lock_attempt = std::thread::spawn(move || {
+        let acquired = lock_state.store().is_ok();
+        let _ = acquired_tx.send(acquired);
+    });
+    let acquired_before_release = acquired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or(false);
+    release_tx
+        .send(())
+        .expect("blocked scanner should still be waiting");
+
+    let scan_result = detection.join().expect("detection thread should join");
+    lock_attempt.join().expect("lock thread should join");
+    assert!(acquired_before_release);
+    assert_eq!(
+        scan_result
+            .expect("detection should succeed")
+            .suggestions
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -573,6 +1125,33 @@ fn serialization_is_camel_case_and_keeps_stable_enum_values_and_warnings() {
     assert_eq!(
         serde_json::to_value(SourceKind::NpmScript).expect("kind should serialize"),
         "npmScript"
+    );
+    assert_eq!(
+        serde_json::to_value(SourceKind::PowerShell).expect("kind should serialize"),
+        "powerShell"
+    );
+    assert_eq!(
+        serde_json::to_value(SourceKind::Cmd).expect("kind should serialize"),
+        "cmd"
+    );
+    assert_eq!(
+        serde_json::to_value(SourceKind::Bat).expect("kind should serialize"),
+        "bat"
+    );
+    assert_eq!(
+        serde_json::to_value(DetectionWarningKind::UnsafeWindowsScriptName)
+            .expect("warning kind should serialize"),
+        "unsafeWindowsScriptName"
+    );
+    assert_eq!(
+        serde_json::to_value(DetectionWarningKind::MatchesRegisteredService)
+            .expect("warning kind should serialize"),
+        "matchesRegisteredService"
+    );
+    assert_eq!(
+        serde_json::to_value(DetectionWarningKind::WindowsScriptLimitReached)
+            .expect("warning kind should serialize"),
+        "windowsScriptLimitReached"
     );
     let warning = DetectionWarning {
         kind: DetectionWarningKind::FileDisappeared,

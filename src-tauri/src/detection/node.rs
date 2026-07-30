@@ -5,7 +5,8 @@ use std::path::Path;
 use uuid::Uuid;
 
 // Fixed forever: changing it would invalidate user choices keyed by stable_id.
-const DETECTION_NAMESPACE: Uuid = Uuid::from_u128(0x8f6f_7517_6f46_58e0_9bb8_42e8_211f_8dcc);
+pub(super) const DETECTION_NAMESPACE: Uuid =
+    Uuid::from_u128(0x8f6f_7517_6f46_58e0_9bb8_42e8_211f_8dcc);
 
 pub(super) struct PackageInspection {
     pub suggestions: Vec<ServiceSuggestion>,

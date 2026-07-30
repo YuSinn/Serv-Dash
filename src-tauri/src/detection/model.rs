@@ -30,6 +30,9 @@ pub(crate) struct ServiceSuggestion {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum SourceKind {
     NpmScript,
+    PowerShell,
+    Cmd,
+    Bat,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -55,4 +58,7 @@ pub(crate) enum DetectionWarningKind {
     PackageJsonLimitReached,
     SuggestionLimitReached,
     PackageJsonTooLarge,
+    UnsafeWindowsScriptName,
+    MatchesRegisteredService,
+    WindowsScriptLimitReached,
 }

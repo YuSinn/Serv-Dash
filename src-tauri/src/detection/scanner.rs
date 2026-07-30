@@ -1,7 +1,9 @@
 use super::error::DetectionError;
-use super::model::{DetectionResult, DetectionWarning, DetectionWarningKind};
+use super::model::{DetectionResult, DetectionWarning, DetectionWarningKind, ServiceSuggestion};
 use super::node::{inspect_package, PackageContext};
+use super::windows_scripts::{inspect_windows_script, source_kind};
 use crate::projects::{is_path_within, normalize_existing_directory};
+use std::collections::HashSet;
 use std::fs::{self, DirEntry};
 use std::io;
 use std::path::Path;
@@ -10,6 +12,7 @@ use std::path::Path;
 pub(super) const MAX_DEPTH: u32 = 5;
 pub(super) const MAX_DIRECTORIES: u32 = 2_000;
 pub(super) const MAX_PACKAGE_JSON_FILES: u32 = 200;
+pub(super) const MAX_WINDOWS_SCRIPTS: u32 = 200;
 pub(super) const MAX_SUGGESTIONS: usize = 500;
 pub(super) const MAX_PACKAGE_JSON_BYTES: u64 = 1024 * 1024;
 
@@ -36,6 +39,7 @@ pub(super) struct ScanConfig {
     pub max_depth: u32,
     pub max_directories: u32,
     pub max_package_json_files: u32,
+    pub max_windows_scripts: u32,
     pub max_suggestions: usize,
     pub max_package_json_bytes: u64,
     pub before_read: Option<fn(&Path) -> io::Result<()>>,
@@ -47,6 +51,7 @@ impl Default for ScanConfig {
             max_depth: MAX_DEPTH,
             max_directories: MAX_DIRECTORIES,
             max_package_json_files: MAX_PACKAGE_JSON_FILES,
+            max_windows_scripts: MAX_WINDOWS_SCRIPTS,
             max_suggestions: MAX_SUGGESTIONS,
             max_package_json_bytes: MAX_PACKAGE_JSON_BYTES,
             before_read: None,
@@ -70,6 +75,8 @@ pub(super) fn scan_project(
     };
     let mut pending = vec![(root.clone(), 0_u32)];
     let mut package_count = 0_u32;
+    let mut windows_script_count = 0_u32;
+    let mut stable_ids = HashSet::new();
 
     'scan: while let Some((directory, depth)) = pending.pop() {
         if result.scanned_directories >= config.max_directories {
@@ -157,6 +164,93 @@ pub(super) fn scan_project(
                 }
                 continue;
             }
+
+            if metadata.is_file() {
+                if let Some(kind) = source_kind(entry_name) {
+                    if result.suggestions.len() >= config.max_suggestions {
+                        add_limit_warning(
+                            &mut result,
+                            DetectionWarningKind::SuggestionLimitReached,
+                            "The service suggestion limit was reached.",
+                            relative_path(&root, &entry_path),
+                        );
+                        break 'scan;
+                    }
+                    if windows_script_count >= config.max_windows_scripts {
+                        add_limit_warning(
+                            &mut result,
+                            DetectionWarningKind::WindowsScriptLimitReached,
+                            "The Windows script scan limit was reached.",
+                            relative_path(&root, &entry_path),
+                        );
+                        continue;
+                    }
+                    windows_script_count += 1;
+                    let source_path =
+                        relative_path(&root, &entry_path).unwrap_or_else(|| entry_name.to_owned());
+                    if let Err(error) = before_read(config, &entry_path) {
+                        result.truncated = true;
+                        result.warnings.push(filesystem_warning(
+                            &error,
+                            "inspect Windows script",
+                            Some(source_path),
+                        ));
+                        continue;
+                    }
+                    let current_metadata = match fs::symlink_metadata(&entry_path) {
+                        Ok(metadata) => metadata,
+                        Err(error) => {
+                            result.truncated = true;
+                            result.warnings.push(filesystem_warning(
+                                &error,
+                                "inspect Windows script",
+                                Some(source_path),
+                            ));
+                            continue;
+                        }
+                    };
+                    if is_link_or_reparse_point(&current_metadata) {
+                        result.warnings.push(DetectionWarning {
+                            kind: DetectionWarningKind::SymlinkOrJunctionSkipped,
+                            message: "A symbolic link, junction, or reparse point was skipped."
+                                .to_owned(),
+                            path: Some(source_path),
+                        });
+                        continue;
+                    }
+                    if !current_metadata.is_file() {
+                        result.truncated = true;
+                        result.warnings.push(filesystem_warning(
+                            &io::Error::from(io::ErrorKind::NotFound),
+                            "inspect Windows script",
+                            Some(source_path),
+                        ));
+                        continue;
+                    }
+                    let working_directory =
+                        relative_path(&root, &directory).unwrap_or_else(|| ".".to_owned());
+                    let inspection = inspect_windows_script(
+                        project_id,
+                        kind,
+                        &source_path,
+                        &working_directory,
+                        entry_name,
+                    );
+                    result.warnings.extend(inspection.warnings);
+                    if let Some(suggestion) = inspection.suggestion {
+                        if !push_suggestion(
+                            &mut result,
+                            &mut stable_ids,
+                            suggestion,
+                            config.max_suggestions,
+                            Some(source_path),
+                        ) {
+                            break 'scan;
+                        }
+                    }
+                    continue;
+                }
+            }
             if entry_name != "package.json" || !metadata.is_file() {
                 continue;
             }
@@ -213,22 +307,17 @@ pub(super) fn scan_project(
                 result.truncated = true;
             }
             result.warnings.extend(inspection.warnings);
-            let remaining = config
-                .max_suggestions
-                .saturating_sub(result.suggestions.len());
-            if inspection.suggestions.len() > remaining {
-                result
-                    .suggestions
-                    .extend(inspection.suggestions.into_iter().take(remaining));
-                add_limit_warning(
+            for suggestion in inspection.suggestions {
+                if !push_suggestion(
                     &mut result,
-                    DetectionWarningKind::SuggestionLimitReached,
-                    "The service suggestion limit was reached.",
-                    Some(source_path),
-                );
-                break 'scan;
+                    &mut stable_ids,
+                    suggestion,
+                    config.max_suggestions,
+                    Some(source_path.clone()),
+                ) {
+                    break 'scan;
+                }
             }
-            result.suggestions.extend(inspection.suggestions);
         }
 
         child_directories.sort_by(|left, right| compare_names(left, right));
@@ -240,6 +329,29 @@ pub(super) fn scan_project(
         );
     }
     Ok(result)
+}
+
+pub(super) fn push_suggestion(
+    result: &mut DetectionResult,
+    stable_ids: &mut HashSet<String>,
+    suggestion: ServiceSuggestion,
+    max_suggestions: usize,
+    path: Option<String>,
+) -> bool {
+    if !stable_ids.insert(suggestion.stable_id.clone()) {
+        return true;
+    }
+    if result.suggestions.len() >= max_suggestions {
+        add_limit_warning(
+            result,
+            DetectionWarningKind::SuggestionLimitReached,
+            "The service suggestion limit was reached.",
+            path,
+        );
+        return false;
+    }
+    result.suggestions.push(suggestion);
+    true
 }
 
 fn sorted_entries(
