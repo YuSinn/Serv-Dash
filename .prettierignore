@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+audit-repeats*.log
+package-lock.json
+src-tauri/Cargo.lock
+src-tauri/icons/
+*.ico
+*.icns
+*.png

@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust / Tauri build output (also ignored locally via src-tauri/.gitignore)
+/src-tauri/target/
+
+# Tauri-generated capability schemas (auto-regenerated; not hand-authored)
+/src-tauri/gen/schemas/
+
+# Local/manual audit or diagnostic logs (already matched by *.log above; named explicitly for clarity)
+audit-repeats*.log

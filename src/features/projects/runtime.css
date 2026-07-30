@@ -1,0 +1,365 @@
+.project-status-active {
+  color: #b45309;
+}
+
+.project-status-active span {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14);
+}
+
+.project-runtime-warning {
+  margin: -9px 0 13px;
+  color: #92400e;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.runtime-notice {
+  background: #f5f7ff;
+  border-color: #dce2ff;
+}
+
+.runtime-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 10px 12px;
+  color: #526077;
+  font-size: 11px;
+  background: #f8fafc;
+  border: 1px solid #e4e9f0;
+  border-radius: 9px;
+}
+
+.runtime-summary strong {
+  margin-right: auto;
+  color: #334155;
+  font-size: 12px;
+}
+
+.runtime-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  background: #94a3b8;
+  border-radius: 50%;
+}
+
+.runtime-starting .runtime-status-dot,
+.runtime-stopping .runtime-status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14);
+}
+
+.runtime-running .runtime-status-dot {
+  background: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+  animation: runtime-pulse 1.8s ease-in-out infinite;
+}
+
+.runtime-exited .runtime-status-dot {
+  background: #10b981;
+}
+
+.runtime-failed .runtime-status-dot {
+  background: #ef4444;
+}
+
+@keyframes runtime-pulse {
+  50% {
+    opacity: 0.52;
+  }
+}
+
+.runtime-health-note,
+.runtime-started-at,
+.runtime-exit-code,
+.runtime-card-error,
+.active-service-warning {
+  margin: 9px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.runtime-health-note,
+.runtime-started-at {
+  color: #64748b;
+}
+
+.runtime-exit-code {
+  color: #334155;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-weight: 700;
+}
+
+.runtime-card-error {
+  padding: 9px 10px;
+  color: #991b1b;
+  background: #fff7f7;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.active-service-warning {
+  margin: 0 0 13px;
+  color: #92400e;
+}
+
+.service-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 13px;
+}
+
+.service-action-button {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+
+.service-logs-panel {
+  margin-top: 28px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #dce3ed;
+  border-radius: 16px;
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.055);
+}
+
+.logs-panel-header {
+  display: flex;
+  gap: 24px;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 21px 23px;
+  border-bottom: 1px solid #e5eaf1;
+}
+
+.logs-panel-header .eyebrow {
+  margin-bottom: 5px;
+  font-size: 10px;
+}
+
+.logs-panel-header h2 {
+  margin: 0;
+  color: #172033;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.logs-panel-header p:last-child {
+  margin: 6px 0 0;
+  color: #7a8698;
+  font-size: 11px;
+}
+
+.logs-panel-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 13px;
+  align-items: center;
+}
+
+.logs-panel-actions .secondary-button {
+  min-height: 36px;
+  padding: 0 13px;
+  font-size: 11px;
+}
+
+.auto-scroll-toggle {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  color: #526077;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.auto-scroll-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: #4f46e5;
+}
+
+.logs-viewport {
+  min-height: 260px;
+  max-height: 440px;
+  overflow: auto;
+  color: #dbe5f5;
+  background: #0c1322;
+  scrollbar-color: #334155 #0c1322;
+}
+
+.logs-viewport:focus-visible {
+  outline: 3px solid rgba(99, 102, 241, 0.45);
+  outline-offset: -3px;
+}
+
+.logs-empty-state {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  padding: 30px;
+  color: #718096;
+  font-size: 12px;
+  text-align: center;
+}
+
+.log-entries {
+  min-width: 680px;
+  margin: 0;
+  padding: 9px 0;
+  list-style: none;
+}
+
+.log-entry {
+  display: grid;
+  grid-template-columns: 55px 76px 55px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-height: 26px;
+  padding: 4px 16px;
+  font:
+    11px/1.6 'Cascadia Code',
+    Consolas,
+    monospace;
+}
+
+.log-entry:hover {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.log-sequence,
+.log-entry time {
+  color: #53627a;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-source {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.log-stdout .log-source {
+  color: #60a5fa;
+}
+
+.log-stderr .log-source {
+  color: #fb7185;
+}
+
+.log-stderr .log-text {
+  color: #fecdd3;
+}
+
+.log-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.logs-panel-footer {
+  padding: 10px 16px;
+  color: #7a8698;
+  font-size: 10px;
+  line-height: 1.45;
+  background: #f8fafc;
+  border-top: 1px solid #e5eaf1;
+}
+
+.start-service-dialog {
+  width: min(100%, 680px);
+}
+
+.dialog-eyebrow-runtime {
+  color: #2563eb;
+}
+
+.start-preview-details {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.start-preview-details div {
+  min-width: 0;
+}
+
+.start-preview-details dt {
+  margin-bottom: 5px;
+  color: #7a8698;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.start-preview-details dd {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.start-preview-details pre {
+  max-height: 150px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 13px;
+  color: #dbe5f5;
+  font:
+    12px/1.6 'Cascadia Code',
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  background: #0c1322;
+  border-radius: 8px;
+}
+
+.start-runtime-warning {
+  margin: 18px 0 0;
+  padding: 12px 13px;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.55;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 9px;
+}
+
+.start-runtime-warning code {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+}
+
+@media (max-width: 700px) {
+  .logs-panel-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .logs-panel-actions {
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 560px) {
+  .service-run-actions,
+  .service-run-actions button {
+    width: 100%;
+  }
+
+  .logs-panel-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
