@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   addService as addServiceRequest,
   getErrorMessage,
@@ -8,57 +8,136 @@ import {
   updateService as updateServiceRequest,
 } from './api';
 import type { ServiceDefinition, ServiceInput, ServicesController } from './types';
+import {
+  createServiceMutationCoordinator,
+  useDetectedServiceSubmission,
+  type ServiceMutationCoordinator,
+  type UseDetectedServiceSubmissionResult,
+} from './useDetectedServiceSubmission';
 
-export function useServices(projectId: string): ServicesController {
+export interface UseServicesResult extends ServicesController {
+  readonly detectedSubmission: UseDetectedServiceSubmissionResult;
+}
+
+export function useServices(projectId: string): UseServicesResult {
   const [services, setServices] = useState<ServiceDefinition[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isMutating, setIsMutating] = useState(false);
+  const [isManualMutating, setIsManualMutating] = useState(false);
+  const [isResolvingDirectory, setIsResolvingDirectory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(false);
+  const projectIdRef = useRef(projectId);
+  const manualGenerationRef = useRef(0);
+  const mutationCoordinatorRef = useRef<ServiceMutationCoordinator | null>(null);
+  mutationCoordinatorRef.current ??= createServiceMutationCoordinator();
+  const mutationCoordinator = mutationCoordinatorRef.current;
+  const replaceServices = useCallback((nextServices: ServiceDefinition[]) => {
+    setServices(nextServices);
+  }, []);
+  const detectedSubmission = useDetectedServiceSubmission(
+    projectId,
+    replaceServices,
+    mutationCoordinator,
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      manualGenerationRef.current += 1;
+      mutationCoordinator.invalidate();
+    };
+  }, [mutationCoordinator]);
 
   useEffect(() => {
     let isActive = true;
+    projectIdRef.current = projectId;
+    manualGenerationRef.current += 1;
+    mutationCoordinator.invalidate();
+    setServices([]);
     setIsLoading(true);
+    setIsManualMutating(false);
+    setIsResolvingDirectory(false);
     setError(null);
+
+    const loadOwner = mutationCoordinator.acquire();
+    if (loadOwner === null) {
+      setIsLoading(false);
+      return () => {
+        isActive = false;
+      };
+    }
+    const isCurrentLoad = (): boolean =>
+      isActive &&
+      mountedRef.current &&
+      projectIdRef.current === projectId &&
+      mutationCoordinator.isOwner(loadOwner);
 
     void listServices(projectId)
       .then((loadedServices) => {
-        if (isActive) {
+        if (isCurrentLoad()) {
           setServices(loadedServices);
         }
       })
       .catch((loadError: unknown) => {
-        if (isActive) {
+        if (isCurrentLoad()) {
           setError(getErrorMessage(loadError));
         }
       })
       .finally(() => {
-        if (isActive) {
+        if (isCurrentLoad()) {
           setIsLoading(false);
         }
+        mutationCoordinator.release(loadOwner);
       });
 
     return () => {
       isActive = false;
     };
-  }, [projectId]);
+  }, [mutationCoordinator, projectId]);
 
   const clearError = useCallback(() => setError(null), []);
 
   const mutateServices = useCallback(
     async (operation: () => Promise<ServiceDefinition[]>): Promise<boolean> => {
-      setIsMutating(true);
+      if (!mountedRef.current || projectIdRef.current !== projectId) {
+        return false;
+      }
+      const owner = mutationCoordinator.acquire();
+      if (owner === null) {
+        return false;
+      }
+      const generation = manualGenerationRef.current + 1;
+      manualGenerationRef.current = generation;
+      const isCurrentMutation = (): boolean =>
+        mountedRef.current &&
+        projectIdRef.current === projectId &&
+        manualGenerationRef.current === generation &&
+        mutationCoordinator.isOwner(owner);
+
+      setIsManualMutating(true);
       setError(null);
       try {
-        setServices(await operation());
+        const nextServices = await operation();
+        if (!isCurrentMutation()) {
+          return false;
+        }
+        setServices(nextServices);
         return true;
       } catch (mutationError) {
+        if (!isCurrentMutation()) {
+          return false;
+        }
         setError(getErrorMessage(mutationError));
         return false;
       } finally {
-        setIsMutating(false);
+        if (isCurrentMutation()) {
+          setIsManualMutating(false);
+        }
+        mutationCoordinator.release(owner);
       }
     },
-    [],
+    [mutationCoordinator, projectId],
   );
 
   const addService = useCallback(
@@ -79,7 +158,7 @@ export function useServices(projectId: string): ServicesController {
 
   const resolveWorkingDirectory = useCallback(
     async (selectedPath: string): Promise<string | null> => {
-      setIsMutating(true);
+      setIsResolvingDirectory(true);
       setError(null);
       try {
         return await resolveServiceDirectory(projectId, selectedPath);
@@ -87,7 +166,7 @@ export function useServices(projectId: string): ServicesController {
         setError(getErrorMessage(resolveError));
         return null;
       } finally {
-        setIsMutating(false);
+        setIsResolvingDirectory(false);
       }
     },
     [projectId],
@@ -96,12 +175,14 @@ export function useServices(projectId: string): ServicesController {
   return {
     services,
     isLoading,
-    isMutating,
+    isMutating:
+      isManualMutating || isResolvingDirectory || detectedSubmission.status === 'submitting',
     error,
     clearError,
     addService,
     updateService,
     removeService,
     resolveWorkingDirectory,
+    detectedSubmission,
   };
 }

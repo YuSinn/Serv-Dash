@@ -3,7 +3,7 @@ import {
   type DetectionDraft,
   type DetectionDraftErrors,
 } from './detectionDraft';
-import type { ServiceDefinition, ServiceInput } from './types';
+import type { DetectedServiceSubmission, ServiceDefinition, ServiceInput } from './types';
 
 export type DetectionSubmissionSkipKind =
   | 'alreadyRegisteredMatch'
@@ -36,6 +36,12 @@ export interface DetectionSubmissionPlan {
   readonly eligible: readonly PreparedDetectedService[];
   readonly skipped: readonly SkippedDetectedService[];
   readonly missingSelectedIds: readonly string[];
+}
+
+export function preparedDetectedServicesToSubmissions(
+  prepared: readonly PreparedDetectedService[],
+): DetectedServiceSubmission[] {
+  return prepared.map(({ stableId, input }) => ({ stableId, service: input }));
 }
 
 export function draftToServiceInput(draft: DetectionDraft): ServiceInput {

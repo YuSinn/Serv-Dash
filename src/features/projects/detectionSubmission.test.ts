@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDetectionSubmissionPlan,
   draftToServiceInput,
+  preparedDetectedServicesToSubmissions,
   type DetectionSubmissionPlan,
+  type PreparedDetectedService,
 } from './detectionSubmission';
 import { validateDetectionDraft, type DetectionDraft } from './detectionDraft';
 import type { ServiceDefinition } from './types';
@@ -65,6 +67,45 @@ describe('draftToServiceInput', () => {
     });
     expect(input).not.toHaveProperty('stableId');
     expect(original).toEqual(before);
+  });
+});
+
+describe('preparedDetectedServicesToSubmissions', () => {
+  it('converts an empty collection without adding state', () => {
+    expect(preparedDetectedServicesToSubmissions([])).toEqual([]);
+  });
+
+  it('preserves order, opaque IDs, input identity, nulls, and source immutability', () => {
+    const firstInput = {
+      name: 'First',
+      workingDirectory: '.',
+      command: 'run first',
+      expectedPort: null,
+      localUrl: null,
+    };
+    const secondInput = {
+      name: 'Second',
+      workingDirectory: 'apps/api',
+      command: 'run second',
+      expectedPort: 3_000,
+      localUrl: 'http://localhost:3000',
+    };
+    const prepared = [
+      { stableId: '  opaque-first  ', input: firstInput },
+      { stableId: 'second', input: secondInput },
+    ] satisfies readonly PreparedDetectedService[];
+    const before = structuredClone(prepared);
+
+    const submissions = preparedDetectedServicesToSubmissions(prepared);
+
+    expect(submissions.map(({ stableId }) => stableId)).toEqual(['  opaque-first  ', 'second']);
+    expect(submissions[0]?.service).toBe(firstInput);
+    expect(submissions[1]?.service).toBe(secondInput);
+    expect(submissions[0]?.service.expectedPort).toBeNull();
+    expect(submissions[0]?.service.localUrl).toBeNull();
+    expect(submissions[0]?.service).not.toHaveProperty('stableId');
+    expect(Object.keys(submissions[0] ?? {})).toEqual(['stableId', 'service']);
+    expect(prepared).toEqual(before);
   });
 });
 
