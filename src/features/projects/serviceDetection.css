@@ -299,6 +299,10 @@
     width: 100%;
   }
 
+  .detection-review-toolbar > div {
+    flex-direction: column;
+  }
+
   .detection-fields {
     grid-template-columns: minmax(0, 1fr);
   }
