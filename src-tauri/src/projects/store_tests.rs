@@ -1,6 +1,10 @@
-use super::{PersistedData, Project, ProjectStore, ServiceInput, DATA_VERSION};
+use super::{
+    DetectedServiceSkipKind, DetectedServiceSubmission, PersistedData, Project, ProjectStore,
+    ServiceInput, DATA_VERSION,
+};
 use crate::projects::error::ProjectError;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,6 +61,35 @@ fn input(name: &str, directory: &str) -> ServiceInput {
         expected_port: Some(3000),
         local_url: Some("http://localhost:3000".to_owned()),
     }
+}
+
+fn input_with_command(name: &str, directory: &str, command: &str) -> ServiceInput {
+    let mut service = input(name, directory);
+    service.command = command.to_owned();
+    service
+}
+
+fn submission(stable_id: &str, service: ServiceInput) -> DetectedServiceSubmission {
+    DetectedServiceSubmission {
+        stable_id: stable_id.to_owned(),
+        service,
+    }
+}
+
+fn temporary_files(data_file: &Path) -> Vec<PathBuf> {
+    fs::read_dir(
+        data_file
+            .parent()
+            .expect("data file should have a parent directory"),
+    )
+    .expect("data directory should be readable")
+    .filter_map(|entry| {
+        let path = entry.expect("directory entry should be readable").path();
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".tmp"))
+            .then_some(path)
+    })
+    .collect()
 }
 
 fn write_json(path: &Path, value: &Value) {
@@ -269,6 +302,490 @@ fn services_are_persisted_and_recovered() {
         .list_services(&setup.project.id)
         .expect("services should reload");
     assert_eq!(recovered, expected);
+}
+
+#[test]
+fn empty_detected_batch_returns_current_services_without_writing() {
+    let setup = Setup::new("detected-empty");
+    let existing = setup
+        .store
+        .add_service(
+            &setup.project.id,
+            &input_with_command("Existing", ".", "existing command"),
+        )
+        .expect("existing service should be added");
+    let before = fs::read(&setup.data_file).expect("data file should exist");
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &[])
+        .expect("empty batch should succeed");
+
+    assert!(result.added.is_empty());
+    assert!(result.skipped.is_empty());
+    assert_eq!(result.services, existing);
+    assert_eq!(
+        fs::read(&setup.data_file).expect("data file should remain"),
+        before
+    );
+    assert!(temporary_files(&setup.data_file).is_empty());
+}
+
+#[test]
+fn valid_detected_service_keeps_correlation_id_and_persists_backend_service() {
+    let setup = Setup::new("detected-valid");
+    let stable_id = "__opaque stable id__";
+    let mut service_input = input("Detected", ".");
+    service_input.expected_port = Some(65_535);
+    service_input.local_url = Some("https://localhost:8443/path".to_owned());
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &[submission(stable_id, service_input)])
+        .expect("valid detected service should be added");
+
+    assert_eq!(result.added.len(), 1);
+    assert_eq!(result.added[0].stable_id, stable_id);
+    assert_ne!(result.added[0].service.id, stable_id);
+    assert!(Uuid::parse_str(&result.added[0].service.id).is_ok());
+    assert_eq!(result.added[0].service.expected_port, Some(65_535));
+    assert_eq!(
+        result.added[0].service.local_url.as_deref(),
+        Some("https://localhost:8443/path")
+    );
+    assert_eq!(result.services, vec![result.added[0].service.clone()]);
+
+    let recovered = ProjectStore::new(setup.data_file.clone())
+        .list_services(&setup.project.id)
+        .expect("detected service should reload");
+    assert_eq!(recovered, result.services);
+    let persisted = fs::read_to_string(&setup.data_file).expect("data file should be readable");
+    assert!(!persisted.contains(stable_id));
+
+    let serialized = serde_json::to_value(&result).expect("result should serialize");
+    assert_eq!(serialized["added"][0]["stableId"], stable_id);
+    assert!(serialized["added"][0]["service"].get("stableId").is_none());
+}
+
+#[test]
+fn valid_detected_batch_preserves_input_order_and_uses_unique_backend_ids() {
+    let setup = Setup::new("detected-many");
+    let submissions = vec![
+        submission("stable-one", input_with_command("One", ".", "run one")),
+        submission("stable-two", input_with_command("Two", ".", "run two")),
+        submission(
+            "stable-three",
+            input_with_command("Three", ".", "run three"),
+        ),
+    ];
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &submissions)
+        .expect("valid batch should succeed");
+
+    assert_eq!(
+        result
+            .added
+            .iter()
+            .map(|item| item.stable_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stable-one", "stable-two", "stable-three"]
+    );
+    assert_eq!(
+        result
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["One", "Two", "Three"]
+    );
+    let ids: HashSet<&str> = result
+        .added
+        .iter()
+        .map(|item| item.service.id.as_str())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.iter().all(|id| Uuid::parse_str(id).is_ok()));
+
+    let recovered = ProjectStore::new(setup.data_file.clone())
+        .list_services(&setup.project.id)
+        .expect("batch should reload");
+    assert_eq!(recovered, result.services);
+}
+
+#[test]
+fn partial_detected_batch_persists_valid_items_and_preserves_result_order() {
+    let setup = Setup::new("detected-partial");
+    let mut invalid = input_with_command("Invalid", ".", "");
+    invalid.local_url = None;
+    let submissions = vec![
+        submission("first", input_with_command("First", ".", "run first")),
+        submission("invalid", invalid),
+        submission(
+            "duplicate-name",
+            input_with_command("fIrSt", ".", "different command"),
+        ),
+        submission("last", input_with_command("Last", ".", "run last")),
+    ];
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &submissions)
+        .expect("partial batch should succeed");
+
+    assert_eq!(
+        result
+            .added
+            .iter()
+            .map(|item| item.stable_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "last"]
+    );
+    assert_eq!(
+        result
+            .skipped
+            .iter()
+            .map(|item| (item.stable_id.as_str(), item.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("invalid", DetectedServiceSkipKind::InvalidCommand),
+            (
+                "duplicate-name",
+                DetectedServiceSkipKind::DuplicateBatchName
+            ),
+        ]
+    );
+    let added_ids: HashSet<&str> = result
+        .added
+        .iter()
+        .map(|item| item.stable_id.as_str())
+        .collect();
+    assert!(result
+        .skipped
+        .iter()
+        .all(|item| !added_ids.contains(item.stable_id.as_str())));
+
+    let recovered = ProjectStore::new(setup.data_file.clone())
+        .list_services(&setup.project.id)
+        .expect("partial batch should reload");
+    assert_eq!(
+        recovered
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First", "Last"]
+    );
+    let serialized = serde_json::to_value(&result).expect("result should serialize");
+    assert_eq!(serialized["skipped"][0]["kind"], "invalidCommand");
+    assert_eq!(serialized["skipped"][1]["kind"], "duplicateBatchName");
+}
+
+#[test]
+fn detected_batch_rejects_existing_name_case_insensitively() {
+    let setup = Setup::new("detected-existing-name");
+    setup
+        .store
+        .add_service(
+            &setup.project.id,
+            &input_with_command("Existing", ".", "existing command"),
+        )
+        .expect("existing service should be added");
+    let before = fs::read(&setup.data_file).expect("data file should exist");
+
+    let result = setup
+        .store
+        .add_detected_services(
+            &setup.project.id,
+            &[submission(
+                "duplicate",
+                input_with_command("eXiStInG", ".", "different command"),
+            )],
+        )
+        .expect("duplicate should be skipped");
+
+    assert!(result.added.is_empty());
+    assert_eq!(
+        result.skipped[0].kind,
+        DetectedServiceSkipKind::DuplicateExistingName
+    );
+    assert_eq!(
+        fs::read(&setup.data_file).expect("data file should remain"),
+        before
+    );
+}
+
+#[test]
+fn detected_functional_duplicate_ignores_directory_case_but_not_command_case() {
+    let setup = Setup::new("detected-existing-functional");
+    let root = Path::new(&setup.project.root_path);
+    for directory in ["Apps/Api", "apps/api", "APPS/API"] {
+        fs::create_dir_all(root.join(directory)).expect("case variant directory should exist");
+    }
+    setup
+        .store
+        .add_service(
+            &setup.project.id,
+            &input_with_command("Existing", "Apps/Api", "npm run -- dev"),
+        )
+        .expect("existing service should be added");
+    let submissions = vec![
+        submission(
+            "functional-duplicate",
+            input_with_command("Functional duplicate", "apps/api", "npm run -- dev"),
+        ),
+        submission(
+            "different-command-case",
+            input_with_command("Different command case", "APPS/API", "NPM run -- dev"),
+        ),
+    ];
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &submissions)
+        .expect("batch should classify functional duplicates");
+
+    assert_eq!(
+        result.skipped[0].kind,
+        DetectedServiceSkipKind::DuplicateExistingWorkingDirectoryCommand
+    );
+    assert_eq!(result.added[0].stable_id, "different-command-case");
+}
+
+#[test]
+fn detected_batch_uses_first_valid_unique_name_and_function() {
+    let setup = Setup::new("detected-batch-duplicates");
+    let submissions = vec![
+        submission("first", input_with_command("First", ".", "first command")),
+        submission(
+            "duplicate-name",
+            input_with_command("fIrSt", ".", "different command"),
+        ),
+        submission(
+            "second",
+            input_with_command("Second", ".", "shared command"),
+        ),
+        submission(
+            "duplicate-function",
+            input_with_command("Third", ".", "shared command"),
+        ),
+    ];
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &submissions)
+        .expect("batch duplicates should be skipped");
+
+    assert_eq!(
+        result
+            .added
+            .iter()
+            .map(|item| item.stable_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+    assert_eq!(
+        result
+            .skipped
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            DetectedServiceSkipKind::DuplicateBatchName,
+            DetectedServiceSkipKind::DuplicateBatchWorkingDirectoryCommand,
+        ]
+    );
+}
+
+#[test]
+fn all_invalid_detected_services_are_classified_without_writing() {
+    let setup = Setup::new("detected-all-invalid");
+    let before = fs::read(&setup.data_file).expect("data file should exist");
+    let mut invalid_command = input("Invalid command", ".");
+    invalid_command.command.clear();
+    let mut invalid_port = input("Invalid port", ".");
+    invalid_port.expected_port = Some(0);
+    let mut invalid_url = input("Invalid URL", ".");
+    invalid_url.local_url = Some("ftp://localhost/files".to_owned());
+    let submissions = vec![
+        submission("invalid-name", input("", ".")),
+        submission("invalid-directory", input("Invalid directory", "missing")),
+        submission("invalid-command", invalid_command),
+        submission("invalid-port", invalid_port),
+        submission("invalid-url", invalid_url),
+    ];
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &submissions)
+        .expect("validation errors should be skipped");
+
+    assert!(result.added.is_empty());
+    assert!(result.services.is_empty());
+    assert_eq!(
+        result
+            .skipped
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            DetectedServiceSkipKind::InvalidServiceName,
+            DetectedServiceSkipKind::InvalidWorkingDirectory,
+            DetectedServiceSkipKind::InvalidCommand,
+            DetectedServiceSkipKind::InvalidExpectedPort,
+            DetectedServiceSkipKind::InvalidLocalUrl,
+        ]
+    );
+    assert!(result.skipped.iter().all(|item| !item.message.is_empty()));
+    assert_eq!(
+        fs::read(&setup.data_file).expect("data file should remain"),
+        before
+    );
+    assert!(temporary_files(&setup.data_file).is_empty());
+}
+
+#[test]
+fn invalid_detected_service_does_not_reserve_batch_keys() {
+    let setup = Setup::new("detected-invalid-reservation");
+    let mut invalid = input_with_command("Shared", ".", "shared command");
+    invalid.expected_port = Some(0);
+    let valid = input_with_command("shared", ".", "shared command");
+
+    let result = setup
+        .store
+        .add_detected_services(
+            &setup.project.id,
+            &[submission("invalid", invalid), submission("valid", valid)],
+        )
+        .expect("valid service after invalid one should be accepted");
+
+    assert_eq!(result.added[0].stable_id, "valid");
+    assert_eq!(
+        result.skipped[0].kind,
+        DetectedServiceSkipKind::InvalidExpectedPort
+    );
+}
+
+#[test]
+fn existing_duplicates_do_not_reserve_new_batch_keys() {
+    let setup = Setup::new("detected-existing-reservation");
+    setup
+        .store
+        .add_service(
+            &setup.project.id,
+            &input_with_command("Existing", ".", "existing command"),
+        )
+        .expect("existing service should be added");
+    let submissions = vec![
+        submission(
+            "duplicate-name",
+            input_with_command("existing", ".", "new functional key"),
+        ),
+        submission(
+            "after-name",
+            input_with_command("After name", ".", "new functional key"),
+        ),
+        submission(
+            "duplicate-function",
+            input_with_command("Reserved only if bug", ".", "existing command"),
+        ),
+        submission(
+            "after-function",
+            input_with_command("reserved only if bug", ".", "fresh command"),
+        ),
+    ];
+
+    let result = setup
+        .store
+        .add_detected_services(&setup.project.id, &submissions)
+        .expect("existing duplicates should not reserve batch keys");
+
+    assert_eq!(
+        result
+            .added
+            .iter()
+            .map(|item| item.stable_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["after-name", "after-function"]
+    );
+    assert_eq!(
+        result
+            .skipped
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            DetectedServiceSkipKind::DuplicateExistingName,
+            DetectedServiceSkipKind::DuplicateExistingWorkingDirectoryCommand,
+        ]
+    );
+}
+
+#[test]
+fn missing_project_is_a_global_error_and_does_not_write() {
+    let setup = Setup::new("detected-missing-project");
+    let before = fs::read(&setup.data_file).expect("data file should exist");
+
+    assert!(matches!(
+        setup.store.add_detected_services(
+            &Uuid::new_v4().to_string(),
+            &[submission("one", input("One", "."))],
+        ),
+        Err(ProjectError::ProjectNotFound { .. })
+    ));
+    assert_eq!(
+        fs::read(&setup.data_file).expect("data file should remain"),
+        before
+    );
+}
+
+#[test]
+fn historical_functional_duplicates_still_load_and_block_another_detected_service() {
+    let setup = Setup::new("detected-historical-functional");
+    setup
+        .store
+        .add_service(
+            &setup.project.id,
+            &input_with_command("Historical one", ".", "same command"),
+        )
+        .expect("first historical service should be added");
+    setup
+        .store
+        .add_service(
+            &setup.project.id,
+            &input_with_command("Historical two", ".", "same command"),
+        )
+        .expect("manual add should keep allowing functional duplicates");
+    assert_eq!(
+        ProjectStore::new(setup.data_file.clone())
+            .list_services(&setup.project.id)
+            .expect("historical duplicates should load")
+            .len(),
+        2
+    );
+    let before = fs::read(&setup.data_file).expect("data file should exist");
+
+    let result = setup
+        .store
+        .add_detected_services(
+            &setup.project.id,
+            &[submission(
+                "third",
+                input_with_command("Historical three", ".", "same command"),
+            )],
+        )
+        .expect("third functional duplicate should be skipped");
+
+    assert!(result.added.is_empty());
+    assert_eq!(
+        result.skipped[0].kind,
+        DetectedServiceSkipKind::DuplicateExistingWorkingDirectoryCommand
+    );
+    assert_eq!(result.services.len(), 2);
+    assert_eq!(
+        fs::read(&setup.data_file).expect("data file should remain"),
+        before
+    );
 }
 
 #[test]

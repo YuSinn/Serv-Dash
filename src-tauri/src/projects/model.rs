@@ -47,6 +47,51 @@ pub(crate) struct ServiceInput {
     pub local_url: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DetectedServiceSubmission {
+    pub stable_id: String,
+    pub service: ServiceInput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DetectedServiceSkipKind {
+    InvalidServiceName,
+    InvalidWorkingDirectory,
+    InvalidCommand,
+    InvalidExpectedPort,
+    InvalidLocalUrl,
+    DuplicateExistingName,
+    DuplicateExistingWorkingDirectoryCommand,
+    DuplicateBatchName,
+    DuplicateBatchWorkingDirectoryCommand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AddedDetectedService {
+    pub stable_id: String,
+    pub service: ServiceDefinition,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkippedDetectedService {
+    pub stable_id: String,
+    pub name: String,
+    pub kind: DetectedServiceSkipKind,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AddDetectedServicesResult {
+    pub added: Vec<AddedDetectedService>,
+    pub skipped: Vec<SkippedDetectedService>,
+    pub services: Vec<ServiceDefinition>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ServiceLaunchSpec {
     pub project_id: String,

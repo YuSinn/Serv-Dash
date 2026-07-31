@@ -1,8 +1,9 @@
 use crate::projects::error::ProjectError;
 use crate::projects::model::{
     normalize_command, normalize_expected_port, normalize_local_url, normalize_service_name,
-    service_name_key, LegacyPersistedData, PersistedData, Project, ServiceDefinition, ServiceInput,
-    ServiceLaunchSpec, DATA_VERSION, LEGACY_DATA_VERSION,
+    service_name_key, AddDetectedServicesResult, AddedDetectedService, DetectedServiceSkipKind,
+    DetectedServiceSubmission, LegacyPersistedData, PersistedData, Project, ServiceDefinition,
+    ServiceInput, ServiceLaunchSpec, SkippedDetectedService, DATA_VERSION, LEGACY_DATA_VERSION,
 };
 use crate::projects::paths::{
     canonical_service_directory, normalize_existing_directory, normalize_service_directory,
@@ -10,6 +11,7 @@ use crate::projects::paths::{
 };
 use chrono::{SecondsFormat, Utc};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -170,6 +172,116 @@ impl ProjectStore {
 
         self.save(&data)?;
         Ok(services)
+    }
+
+    pub fn add_detected_services(
+        &self,
+        project_id: &str,
+        submissions: &[DetectedServiceSubmission],
+    ) -> Result<AddDetectedServicesResult, ProjectError> {
+        let mut data = self.load()?;
+        let project = find_project_mut(&mut data, project_id)?;
+        let root_path = project.root_path.clone();
+        let existing_names: HashSet<String> = project
+            .services
+            .iter()
+            .map(|service| service_name_key(&service.name))
+            .collect();
+        let existing_service_keys: HashSet<(String, String)> = project
+            .services
+            .iter()
+            .map(|service| service_function_key(&service.working_directory, &service.command))
+            .collect();
+        let mut batch_names = HashSet::new();
+        let mut batch_service_keys = HashSet::new();
+        let mut added = Vec::new();
+        let mut skipped = Vec::new();
+
+        for submission in submissions {
+            let submitted_name = submission.service.name.trim().to_owned();
+            let prepared = match prepare_service(&root_path, &submission.service) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let Some(kind) = detected_service_validation_kind(&error) else {
+                        return Err(error);
+                    };
+                    skipped.push(SkippedDetectedService {
+                        stable_id: submission.stable_id.clone(),
+                        name: submitted_name,
+                        kind,
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            let name_key = service_name_key(&prepared.name);
+            let service_key = service_function_key(&prepared.working_directory, &prepared.command);
+            let duplicate = if existing_names.contains(&name_key) {
+                Some((
+                    DetectedServiceSkipKind::DuplicateExistingName,
+                    "A service with this name already exists.",
+                ))
+            } else if existing_service_keys.contains(&service_key) {
+                Some((
+                    DetectedServiceSkipKind::DuplicateExistingWorkingDirectoryCommand,
+                    "A service with this working directory and command already exists.",
+                ))
+            } else if batch_names.contains(&name_key) {
+                Some((
+                    DetectedServiceSkipKind::DuplicateBatchName,
+                    "Another selected service uses this name.",
+                ))
+            } else if batch_service_keys.contains(&service_key) {
+                Some((
+                    DetectedServiceSkipKind::DuplicateBatchWorkingDirectoryCommand,
+                    "Another selected service uses this working directory and command.",
+                ))
+            } else {
+                None
+            };
+
+            if let Some((kind, message)) = duplicate {
+                skipped.push(SkippedDetectedService {
+                    stable_id: submission.stable_id.clone(),
+                    name: prepared.name,
+                    kind,
+                    message: message.to_owned(),
+                });
+                continue;
+            }
+
+            let now = current_timestamp();
+            let service = ServiceDefinition {
+                id: Uuid::new_v4().to_string(),
+                name: prepared.name,
+                working_directory: prepared.working_directory,
+                command: prepared.command,
+                expected_port: prepared.expected_port,
+                local_url: prepared.local_url,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            batch_names.insert(name_key);
+            batch_service_keys.insert(service_key);
+            project.services.push(service.clone());
+            project.updated_at = now;
+            added.push(AddedDetectedService {
+                stable_id: submission.stable_id.clone(),
+                service,
+            });
+        }
+
+        let services = project.services.clone();
+        if !added.is_empty() {
+            self.save(&data)?;
+        }
+
+        Ok(AddDetectedServicesResult {
+            added,
+            skipped,
+            services,
+        })
     }
 
     pub fn update_service(
@@ -378,6 +490,29 @@ fn prepare_service(root_path: &str, input: &ServiceInput) -> Result<PreparedServ
         expected_port: normalize_expected_port(input.expected_port)?,
         local_url: normalize_local_url(input.local_url.as_deref())?,
     })
+}
+
+fn detected_service_validation_kind(error: &ProjectError) -> Option<DetectedServiceSkipKind> {
+    match error {
+        ProjectError::InvalidServiceName { .. } => {
+            Some(DetectedServiceSkipKind::InvalidServiceName)
+        }
+        ProjectError::InvalidWorkingDirectory { .. }
+        | ProjectError::WorkingDirectoryNotFound { .. }
+        | ProjectError::WorkingDirectoryNotDirectory { .. }
+        | ProjectError::WorkingDirectoryOutsideProject { .. }
+        | ProjectError::WorkingDirectoryEscapesProject { .. } => {
+            Some(DetectedServiceSkipKind::InvalidWorkingDirectory)
+        }
+        ProjectError::InvalidCommand { .. } => Some(DetectedServiceSkipKind::InvalidCommand),
+        ProjectError::InvalidPort { .. } => Some(DetectedServiceSkipKind::InvalidExpectedPort),
+        ProjectError::InvalidUrl { .. } => Some(DetectedServiceSkipKind::InvalidLocalUrl),
+        _ => None,
+    }
+}
+
+fn service_function_key(working_directory: &str, command: &str) -> (String, String) {
+    (working_directory.to_lowercase(), command.to_owned())
 }
 
 fn reject_duplicate_service_name(
