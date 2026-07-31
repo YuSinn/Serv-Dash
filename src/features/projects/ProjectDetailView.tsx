@@ -3,6 +3,7 @@ import './services.css';
 import './runtime.css';
 import { RemoveServiceDialog } from './RemoveServiceDialog';
 import { ServiceCard } from './ServiceCard';
+import { ServiceDetectionControl } from './ServiceDetectionControl';
 import { ServiceDialog } from './ServiceDialog';
 import { ServiceLogsPanel } from './ServiceLogsPanel';
 import { StartServiceDialog } from './StartServiceDialog';
@@ -171,6 +172,7 @@ export function ProjectDetailView({
           >
             Open root folder
           </button>
+          <ServiceDetectionControl projectId={project.id} />
           <button
             className="primary-button"
             type="button"
