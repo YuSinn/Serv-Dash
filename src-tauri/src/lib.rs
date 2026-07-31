@@ -4,9 +4,9 @@ mod runtime;
 
 use detection::detect_project_services;
 use projects::{
-    add_project, add_service, list_projects, list_services, open_project_folder, remove_project,
-    remove_service, rename_project, resolve_service_directory, update_service, ProjectStore,
-    ProjectsState,
+    add_detected_services, add_project, add_service, list_projects, list_services,
+    open_project_folder, remove_project, remove_service, rename_project, resolve_service_directory,
+    update_service, ProjectStore, ProjectsState,
 };
 use runtime::{
     clear_service_logs, get_service_logs, get_service_runtime, get_service_start_preview,
@@ -33,6 +33,7 @@ pub fn run() {
             open_project_folder,
             list_services,
             add_service,
+            add_detected_services,
             update_service,
             remove_service,
             resolve_service_directory,

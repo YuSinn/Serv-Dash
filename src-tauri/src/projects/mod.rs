@@ -5,8 +5,9 @@ mod paths;
 mod store;
 
 pub(crate) use commands::{
-    add_project, add_service, list_projects, list_services, open_project_folder, remove_project,
-    remove_service, rename_project, resolve_service_directory, update_service,
+    add_detected_services, add_project, add_service, list_projects, list_services,
+    open_project_folder, remove_project, remove_service, rename_project, resolve_service_directory,
+    update_service,
 };
 pub(crate) use error::{CommandError, ProjectError};
 #[cfg(test)]
