@@ -1,7 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { detectProjectServices, ProjectsApiError } from './api';
-import type { DetectionResult, DetectionSourceKind, DetectionWarningKind } from './types';
+import { addDetectedServices, detectProjectServices, ProjectsApiError } from './api';
+import type {
+  AddDetectedServicesResult,
+  DetectedServiceSkipKind,
+  DetectedServiceSubmission,
+  DetectionResult,
+  DetectionSourceKind,
+  DetectionWarningKind,
+  ServiceDefinition,
+} from './types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -115,6 +123,78 @@ const detectionFixture = {
   truncated: true,
 } satisfies DetectionResult;
 
+const detectedSkipKindCoverage = {
+  invalidServiceName: true,
+  invalidWorkingDirectory: true,
+  invalidCommand: true,
+  invalidExpectedPort: true,
+  invalidLocalUrl: true,
+  duplicateExistingName: true,
+  duplicateExistingWorkingDirectoryCommand: true,
+  duplicateBatchName: true,
+  duplicateBatchWorkingDirectoryCommand: true,
+} satisfies Record<DetectedServiceSkipKind, true>;
+
+const detectedSubmissions = [
+  {
+    stableId: '  opaque-a  ',
+    service: {
+      name: 'API',
+      workingDirectory: 'apps/api',
+      command: 'npm run -- dev',
+      expectedPort: 3_000,
+      localUrl: 'http://localhost:3000',
+    },
+  },
+  {
+    stableId: 'opaque-b',
+    service: {
+      name: 'Worker',
+      workingDirectory: '.',
+      command: 'npm run -- worker',
+      expectedPort: null,
+      localUrl: null,
+    },
+  },
+] satisfies readonly DetectedServiceSubmission[];
+
+function serviceDefinition(id: string, name: string): ServiceDefinition {
+  return {
+    id,
+    name,
+    workingDirectory: '.',
+    command: `run ${name}`,
+    expectedPort: null,
+    localUrl: null,
+    createdAt: '2026-07-31T00:00:00.000Z',
+    updatedAt: '2026-07-31T00:00:00.000Z',
+  };
+}
+
+const addedServiceA = serviceDefinition('service-a', 'API');
+const addedServiceB = serviceDefinition('service-b', 'Worker');
+const batchResult = {
+  added: [
+    { stableId: '  opaque-a  ', service: addedServiceA },
+    { stableId: 'opaque-b', service: addedServiceB },
+  ],
+  skipped: [
+    {
+      stableId: 'duplicate-a',
+      name: 'Duplicate A',
+      kind: 'duplicateExistingName',
+      message: 'A service with this name already exists.',
+    },
+    {
+      stableId: 'invalid-b',
+      name: 'Invalid B',
+      kind: 'invalidCommand',
+      message: 'Enter a valid command.',
+    },
+  ],
+  services: [addedServiceA, addedServiceB],
+} satisfies AddDetectedServicesResult;
+
 beforeEach(() => {
   invokeMock.mockReset();
 });
@@ -161,5 +241,59 @@ describe('detectProjectServices', () => {
     invokeMock.mockRejectedValue(rejection);
 
     await expect(detectProjectServices('project-123')).rejects.toBe(rejection);
+  });
+});
+
+describe('addDetectedServices', () => {
+  it('passes the exact ordered batch through and returns the backend result unchanged', async () => {
+    invokeMock.mockResolvedValue(batchResult);
+
+    const result = await addDetectedServices('project-123', detectedSubmissions);
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('add_detected_services', {
+      projectId: 'project-123',
+      submissions: detectedSubmissions,
+    });
+    expect(detectedSubmissions.map(({ stableId }) => stableId)).toEqual([
+      '  opaque-a  ',
+      'opaque-b',
+    ]);
+    expect(detectedSubmissions[0]?.service).toEqual({
+      name: 'API',
+      workingDirectory: 'apps/api',
+      command: 'npm run -- dev',
+      expectedPort: 3_000,
+      localUrl: 'http://localhost:3000',
+    });
+    expect(detectedSubmissions[1]?.service.expectedPort).toBeNull();
+    expect(detectedSubmissions[1]?.service.localUrl).toBeNull();
+    expect(detectedSubmissions[0]?.service).not.toHaveProperty('stableId');
+    expect(result).toBe(batchResult);
+    expect(result.added).toBe(batchResult.added);
+    expect(result.skipped).toBe(batchResult.skipped);
+    expect(result.services).toBe(batchResult.services);
+    expect(result.added.map(({ stableId }) => stableId)).toEqual(['  opaque-a  ', 'opaque-b']);
+    expect(result.skipped.map(({ stableId }) => stableId)).toEqual(['duplicate-a', 'invalid-b']);
+    expect(result.services.map(({ id }) => id)).toEqual(['service-a', 'service-b']);
+    expect(Object.keys(detectedSkipKindCoverage)).toHaveLength(9);
+  });
+
+  it('preserves a structured global rejection without retrying', async () => {
+    invokeMock.mockRejectedValue({
+      code: 'persistence_failed',
+      message: 'Project data could not be saved.',
+    });
+
+    const error = await addDetectedServices('project-123', detectedSubmissions).catch(
+      (value: unknown) => value,
+    );
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(ProjectsApiError);
+    expect(error).toMatchObject({
+      code: 'persistence_failed',
+      message: 'Project data could not be saved.',
+    });
   });
 });

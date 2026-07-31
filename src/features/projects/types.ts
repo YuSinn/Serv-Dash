@@ -17,6 +17,40 @@ export interface ServiceInput {
   localUrl: string | null;
 }
 
+export interface DetectedServiceSubmission {
+  stableId: string;
+  service: ServiceInput;
+}
+
+export type DetectedServiceSkipKind =
+  | 'invalidServiceName'
+  | 'invalidWorkingDirectory'
+  | 'invalidCommand'
+  | 'invalidExpectedPort'
+  | 'invalidLocalUrl'
+  | 'duplicateExistingName'
+  | 'duplicateExistingWorkingDirectoryCommand'
+  | 'duplicateBatchName'
+  | 'duplicateBatchWorkingDirectoryCommand';
+
+export interface AddedDetectedService {
+  stableId: string;
+  service: ServiceDefinition;
+}
+
+export interface SkippedDetectedService {
+  stableId: string;
+  name: string;
+  kind: DetectedServiceSkipKind;
+  message: string;
+}
+
+export interface AddDetectedServicesResult {
+  added: AddedDetectedService[];
+  skipped: SkippedDetectedService[];
+  services: ServiceDefinition[];
+}
+
 export interface Project {
   id: string;
   name: string;

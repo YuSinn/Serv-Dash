@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AddDetectedServicesResult,
   DetectionResult,
+  DetectedServiceSubmission,
   Project,
   ServiceDefinition,
   ServiceInput,
@@ -111,6 +113,16 @@ export function addService(projectId: string, service: ServiceInput): Promise<Se
   return invokeCommand<ServiceDefinition[]>('add_service', {
     projectId,
     service,
+  });
+}
+
+export function addDetectedServices(
+  projectId: string,
+  submissions: readonly DetectedServiceSubmission[],
+): Promise<AddDetectedServicesResult> {
+  return invokeCommand<AddDetectedServicesResult>('add_detected_services', {
+    projectId,
+    submissions,
   });
 }
 
