@@ -2,6 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectDetailView } from './ProjectDetailView';
 import {
+  type AddDetectedServicesResult,
   stoppedRuntime,
   type Project,
   type ServiceDefinition,
@@ -43,13 +44,16 @@ function service(id: string, name: string): ServiceDefinition {
   };
 }
 
-function submission(): UseDetectedServiceSubmissionResult {
+function submission(
+  overrides: Partial<UseDetectedServiceSubmissionResult> = {},
+): UseDetectedServiceSubmissionResult {
   return {
     status: 'idle',
     result: null,
     error: null,
     submit: vi.fn().mockResolvedValue(true),
     reset: vi.fn(),
+    ...overrides,
   };
 }
 
@@ -104,6 +108,36 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('ProjectDetailView detected-service wiring', () => {
+  it('renders service cards exclusively from the canonical controller list', () => {
+    const canonical = service('canonical', 'Canonical service');
+    const resultAddedDecoy = service('result-added', 'Result-added decoy');
+    const resultServicesDecoy = service('result-services', 'Result-services decoy');
+    const result: AddDetectedServicesResult = {
+      added: [{ stableId: 'decoy', service: resultAddedDecoy }],
+      skipped: [],
+      services: [resultServicesDecoy],
+    };
+    const detectedSubmission = submission({ status: 'success', result });
+    useServicesMock.mockReturnValue(servicesController([canonical], detectedSubmission));
+
+    render(
+      <ProjectDetailView
+        project={project}
+        projectError={null}
+        isProjectMutating={false}
+        onBack={vi.fn()}
+        onClearProjectError={vi.fn()}
+        onOpenRoot={vi.fn()}
+      />,
+    );
+
+    const cards = screen.getAllByTestId('canonical-service-card');
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveTextContent('Canonical service');
+    expect(cards.some((card) => card.textContent === 'Result-added decoy')).toBe(false);
+    expect(cards.some((card) => card.textContent === 'Result-services decoy')).toBe(false);
+  });
+
   it('renders and passes through only the canonical controller services', () => {
     const detectedSubmission = submission();
     const original = service('original', 'Original service');

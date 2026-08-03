@@ -246,7 +246,7 @@ describe('ServiceDetectionControl', () => {
     expect(submission.reset).not.toHaveBeenCalled();
   });
 
-  it('closes, resets presentation, and returns focus after review', () => {
+  it('closes, resets presentation, and returns focus after review', async () => {
     const submission = submissionState();
     const detection = detectionState({ isOpen: true, status: 'empty', result: result() });
     useServiceDetectionMock.mockReturnValue(detection);
@@ -261,10 +261,47 @@ describe('ServiceDetectionControl', () => {
     const trigger = screen.getByRole('button', { name: 'Detect services' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await act(async () => Promise.resolve());
 
     expect(submission.reset).toHaveBeenCalledTimes(1);
     expect(detection.close).toHaveBeenCalledTimes(1);
     expect(trigger).toHaveFocus();
+  });
+
+  it('returns focus after Escape without targeting an obsolete project trigger', async () => {
+    const submission = submissionState();
+    const firstDetection = detectionState({ isOpen: true, status: 'empty', result: result() });
+    useServiceDetectionMock.mockReturnValue(firstDetection);
+    const { rerender } = render(
+      <ServiceDetectionControl
+        key="project-a"
+        projectId="project-a"
+        services={[]}
+        submission={submission}
+        isBusy={false}
+      />,
+    );
+    const firstTrigger = screen.getByRole('button', { name: 'Detect services' });
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await act(async () => Promise.resolve());
+    expect(firstTrigger).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    useServiceDetectionMock.mockReturnValue(detectionState());
+    rerender(
+      <ServiceDetectionControl
+        key="project-b"
+        projectId="project-b"
+        services={[]}
+        submission={submission}
+        isBusy={false}
+      />,
+    );
+    await act(async () => Promise.resolve());
+
+    expect(firstTrigger.isConnected).toBe(false);
+    expect(screen.getByRole('button', { name: 'Detect services' })).not.toHaveFocus();
   });
 
   it('builds a live confirmation plan and submits only eligible selected services', () => {
@@ -290,15 +327,17 @@ describe('ServiceDetectionControl', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 
-    expect(screen.getByText('1 services eligible to add.')).toBeVisible();
-    expect(screen.getByText('1 selected services omitted locally.')).toBeVisible();
-    expect(screen.getByText('1 selected services no longer present.')).toBeVisible();
+    expect(screen.getByText('1 service eligible to add.')).toBeVisible();
+    expect(screen.getByText('1 selected service omitted locally.')).toBeVisible();
+    expect(screen.getByText('1 selection no longer present.')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Confirm detected services' })).toHaveFocus();
     expect(submission.submit).not.toHaveBeenCalled();
 
     const confirm = screen.getByRole('button', { name: 'Add 1 service' });
     fireEvent.click(confirm);
 
     expect(submission.submit).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveFocus();
     expect(submission.submit).toHaveBeenCalledWith([
       {
         stableId: 'eligible',
@@ -432,7 +471,7 @@ describe('ServiceDetectionControl', () => {
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.getByText('1 services eligible to add.')).toBeVisible();
+    expect(screen.getByText('1 service eligible to add.')).toBeVisible();
 
     rerender(
       <ServiceDetectionControl

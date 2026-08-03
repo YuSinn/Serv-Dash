@@ -59,7 +59,12 @@ export function ServiceDetectionControl({
     confirmationOwnerRef.current = null;
     setPhase('review');
     detection.close();
-    triggerRef.current?.focus();
+    queueMicrotask(() => {
+      const trigger = triggerRef.current;
+      if (trigger?.isConnected && !trigger.disabled) {
+        trigger.focus();
+      }
+    });
   }, [detection.close, locked, submission]);
 
   const handleContinue = useCallback(() => {

@@ -229,10 +229,12 @@ describe('ServiceDetectionDialog detection states', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'Detected services' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveAttribute('aria-busy', 'true');
     expect(dialog).toHaveAccessibleDescription(
       'Review the detected service suggestions. Closing this dialog discards this review.',
     );
     expect(screen.getByRole('status')).toHaveTextContent('Scanning the project for services...');
+    expect(screen.getByRole('status')).toHaveFocus();
     expect(screen.queryByRole('list', { name: 'Detected services' })).not.toBeInTheDocument();
   });
 
@@ -369,15 +371,54 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
     const onClose = vi.fn();
     renderDialog({ phase: 'confirm', plan, onBack, onConfirm, onClose });
 
-    expect(screen.getByText('1 services eligible to add.')).toBeVisible();
-    expect(screen.getByText('1 selected services omitted locally.')).toBeVisible();
-    expect(screen.getByText('2 selected services no longer present.')).toBeVisible();
+    expect(screen.getByText('1 service eligible to add.')).toBeVisible();
+    expect(screen.getByText('1 selected service omitted locally.')).toBeVisible();
+    expect(screen.getByText('2 selections no longer present.')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add 1 service' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(onBack).toHaveBeenCalledTimes(1);
     expect(onConfirm).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 1, 2])('pluralizes all local plan counts for %i', (count) => {
+    const plan = {
+      eligible: Array.from({ length: count }, (_, index) => ({
+        stableId: `eligible-${index}`,
+        input: {
+          name: `Eligible ${index}`,
+          workingDirectory: '.',
+          command: `run eligible-${index}`,
+          expectedPort: null,
+          localUrl: null,
+        },
+      })),
+      skipped: Array.from({ length: count }, (_, index) => ({
+        stableId: `skipped-${index}`,
+        displayName: `Skipped ${index}`,
+        kind: 'invalidDraft' as const,
+        errors: {},
+      })),
+      missingSelectedIds: Array.from({ length: count }, (_, index) => `missing-${index}`),
+    } satisfies DetectionSubmissionPlan;
+
+    renderDialog({ phase: 'confirm', plan });
+
+    expect(
+      screen.getByText(`${count} ${count === 1 ? 'service' : 'services'} eligible to add.`),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        `${count} selected ${count === 1 ? 'service' : 'services'} omitted locally.`,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(`${count} ${count === 1 ? 'selection' : 'selections'} no longer present.`),
+    ).toBeVisible();
+    if (count === 1) {
+      expect(screen.queryByText(/1 services|1 selections/)).not.toBeInTheDocument();
+    }
   });
 
   it('does not allow an empty plan to submit', () => {
@@ -405,7 +446,13 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
     for (const input of screen.getAllByRole('textbox', { name: /Display name/ })) {
       expect(input).toBeDisabled();
     }
-    fireEvent.keyDown(window, { key: 'Escape' });
+    const busyEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(busyEscape);
+    expect(busyEscape.defaultPrevented).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
     expect(onScanAgain).not.toHaveBeenCalled();
 
@@ -417,9 +464,15 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
       onClose,
     });
     expect(screen.getByRole('status')).toHaveTextContent('Adding detected services...');
-    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('dialog')).queryByRole('button')).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    const submittingEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(submittingEscape);
+    expect(submittingEscape.defaultPrevented).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -433,10 +486,37 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
       submission: submission({ status: 'success', result: response }),
     });
     expect(screen.getByRole('heading', { name: 'Service import complete' })).toBeVisible();
-    expect(screen.getByText(`${response.added.length} services added.`)).toBeVisible();
     expect(
-      screen.getByText(`${response.skipped.length} services skipped by the server.`),
+      screen.getByText(
+        `${response.added.length} ${response.added.length === 1 ? 'service' : 'services'} added.`,
+      ),
     ).toBeVisible();
+    expect(
+      screen.getByText(
+        `${response.skipped.length} ${response.skipped.length === 1 ? 'service' : 'services'} skipped by the server.`,
+      ),
+    ).toBeVisible();
+    if (response.added.length > 0) {
+      expect(screen.getByRole('list', { name: 'Added services' })).toBeVisible();
+    }
+    if (response.skipped.length > 0) {
+      expect(screen.getByRole('list', { name: 'Server-skipped services' })).toBeVisible();
+    }
+  });
+
+  it.each([0, 1, 2])('pluralizes added and server-skipped counts for %i', (count) => {
+    const names = Array.from({ length: count }, (_, index) => `Service ${index}`);
+    renderDialog({
+      phase: 'submitted',
+      submission: submission({ status: 'success', result: batchResult(names, names) }),
+    });
+
+    const noun = count === 1 ? 'service' : 'services';
+    expect(screen.getByText(`${count} ${noun} added.`)).toBeVisible();
+    expect(screen.getByText(`${count} ${noun} skipped by the server.`)).toBeVisible();
+    if (count === 1) {
+      expect(screen.queryByText(/1 services|1 selections/)).not.toBeInTheDocument();
+    }
   });
 
   it('keeps a global error separate from skipped results', () => {
@@ -468,15 +548,185 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
 });
 
 describe('ServiceDetectionDialog keyboard behavior', () => {
+  it('moves focus to the logical target for each presentation phase', () => {
+    const detectionValue = detection();
+    const initialSubmission = submission();
+    const view = renderDialog({ detection: detectionValue, submission: initialSubmission });
+
+    expect(screen.getByText('1 of 4 selected')).toHaveFocus();
+
+    view.rerender(
+      <ServiceDetectionDialog
+        detection={detectionValue}
+        submission={initialSubmission}
+        phase="confirm"
+        plan={defaultPlan}
+        busy={false}
+        onClose={view.onClose}
+        onContinue={view.onContinue}
+        onBack={view.onBack}
+        onConfirm={view.onConfirm}
+        onScanAgain={view.onScanAgain}
+      />,
+    );
+    expect(screen.getByRole('heading', { name: 'Confirm detected services' })).toHaveFocus();
+
+    const submitting = submission({ status: 'submitting' });
+    view.rerender(
+      <ServiceDetectionDialog
+        detection={detectionValue}
+        submission={submitting}
+        phase="submitted"
+        plan={defaultPlan}
+        busy={false}
+        onClose={view.onClose}
+        onContinue={view.onContinue}
+        onBack={view.onBack}
+        onConfirm={view.onConfirm}
+        onScanAgain={view.onScanAgain}
+      />,
+    );
+    const submittingStatus = screen.getByRole('status');
+    expect(submittingStatus).toHaveFocus();
+    expect(submittingStatus).toHaveAttribute('aria-live', 'polite');
+    expect(screen.getByRole('dialog')).toHaveAttribute('aria-busy', 'true');
+
+    const success = submission({ status: 'success', result: batchResult(['One'], []) });
+    view.rerender(
+      <ServiceDetectionDialog
+        detection={detectionValue}
+        submission={success}
+        phase="submitted"
+        plan={defaultPlan}
+        busy={false}
+        onClose={view.onClose}
+        onContinue={view.onContinue}
+        onBack={view.onBack}
+        onConfirm={view.onConfirm}
+        onScanAgain={view.onScanAgain}
+      />,
+    );
+    expect(screen.getByRole('heading', { name: 'Service import complete' })).toHaveFocus();
+    expect(screen.getByRole('status')).toContainElement(
+      screen.getByRole('heading', { name: 'Service import complete' }),
+    );
+
+    const failed = submission({ status: 'error', error: new Error('Submission failed.') });
+    view.rerender(
+      <ServiceDetectionDialog
+        detection={detectionValue}
+        submission={failed}
+        phase="submitted"
+        plan={defaultPlan}
+        busy={false}
+        onClose={view.onClose}
+        onContinue={view.onContinue}
+        onBack={view.onBack}
+        onConfirm={view.onConfirm}
+        onScanAgain={view.onScanAgain}
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveFocus();
+
+    view.rerender(
+      <ServiceDetectionDialog
+        detection={detectionValue}
+        submission={initialSubmission}
+        phase="review"
+        plan={defaultPlan}
+        busy={false}
+        onClose={view.onClose}
+        onContinue={view.onContinue}
+        onBack={view.onBack}
+        onConfirm={view.onConfirm}
+        onScanAgain={view.onScanAgain}
+      />,
+    );
+    expect(screen.getByText('1 of 4 selected')).toHaveFocus();
+
+    view.rerender(
+      <ServiceDetectionDialog
+        detection={detection({ status: 'loading', isLoading: true })}
+        submission={initialSubmission}
+        phase="review"
+        plan={defaultPlan}
+        busy={false}
+        onClose={view.onClose}
+        onContinue={view.onContinue}
+        onBack={view.onBack}
+        onConfirm={view.onConfirm}
+        onScanAgain={view.onScanAgain}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveFocus();
+  });
+
+  it('wraps Tab and Shift+Tab within the current dialog controls', () => {
+    renderDialog();
+    const first = screen.getByRole('button', { name: 'Select all' });
+    const last = screen.getByRole('button', { name: 'Close' });
+
+    last.focus();
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(first).toHaveFocus();
+
+    first.focus();
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
+    expect(last).toHaveFocus();
+  });
+
+  it('keeps focus in busy and submitting states without choosing disabled controls', () => {
+    const background = document.createElement('button');
+    background.textContent = 'Background action';
+    document.body.append(background);
+    const first = renderDialog({ busy: true });
+
+    expect(
+      within(screen.getByRole('dialog'))
+        .getAllByRole('button')
+        .every((button) => button.hasAttribute('disabled')),
+    ).toBe(true);
+    background.focus();
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(screen.getByText('1 of 4 selected')).toHaveFocus();
+    first.unmount();
+
+    renderDialog({
+      phase: 'submitted',
+      busy: true,
+      submission: submission({ status: 'submitting' }),
+    });
+    const status = screen.getByRole('status');
+    expect(within(screen.getByRole('dialog')).queryByRole('button')).not.toBeInTheDocument();
+    background.focus();
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(status).toHaveFocus();
+    background.remove();
+  });
+
   it('closes on Escape when idle and removes its listener on unmount', () => {
     const onClose = vi.fn();
     const { unmount } = renderDialog({ onClose });
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(escape);
+    expect(escape.defaultPrevented).toBe(true);
     expect(onClose).toHaveBeenCalledTimes(1);
 
     unmount();
+    const background = document.createElement('button');
+    document.body.append(background);
+    background.focus();
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    window.dispatchEvent(tab);
     fireEvent.keyDown(window, { key: 'Escape' });
+    expect(tab.defaultPrevented).toBe(false);
+    expect(background).toHaveFocus();
     expect(onClose).toHaveBeenCalledTimes(1);
+    background.remove();
   });
 });
