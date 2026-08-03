@@ -1,18 +1,42 @@
 import { useEffect, useRef } from 'react';
+import { getErrorMessage } from './api';
+import type { DetectionSubmissionPlan } from './detectionSubmission';
+import type { ServiceDetectionPresentationPhase } from './ServiceDetectionControl';
 import { DetectionWarnings, ServiceSuggestionRow } from './ServiceSuggestionRow';
+import type { UseDetectedServiceSubmissionResult } from './useDetectedServiceSubmission';
 import type { UseServiceDetectionResult } from './useServiceDetection';
 
 interface ServiceDetectionDialogProps {
   detection: UseServiceDetectionResult;
+  submission: UseDetectedServiceSubmissionResult;
+  phase: ServiceDetectionPresentationPhase;
+  plan: DetectionSubmissionPlan;
+  busy: boolean;
   onClose: () => void;
+  onContinue: () => void;
+  onBack: () => void;
+  onConfirm: () => void;
+  onScanAgain: () => void;
 }
 
-export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionDialogProps) {
+export function ServiceDetectionDialog({
+  detection,
+  submission,
+  phase,
+  plan,
+  busy,
+  onClose,
+  onContinue,
+  onBack,
+  onConfirm,
+  onScanAgain,
+}: ServiceDetectionDialogProps) {
   const focusTargetRef = useRef<HTMLButtonElement>(null);
+  const locked = busy || submission.status === 'submitting';
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !locked) {
         event.preventDefault();
         event.stopPropagation();
         onClose();
@@ -21,11 +45,11 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [locked, onClose]);
 
   useEffect(() => {
     focusTargetRef.current?.focus();
-  }, [detection.status]);
+  }, [detection.status, phase, submission.status]);
 
   const resultDetails = detection.result ? (
     <div className="detection-scan-details">
@@ -42,14 +66,123 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
   let content;
   let actions;
 
-  if (detection.status === 'loading') {
+  if (phase === 'submitted') {
+    if (submission.status === 'submitting') {
+      content = (
+        <div className="detection-state" role="status" aria-live="polite">
+          Adding detected services...
+        </div>
+      );
+      actions = null;
+    } else if (submission.status === 'success' && submission.result) {
+      content = (
+        <div className="detection-state">
+          <h3>Service import complete</h3>
+          <p>{submission.result.added.length} services added.</p>
+          <p>{submission.result.skipped.length} services skipped by the server.</p>
+          {submission.result.added.length > 0 ? (
+            <ul aria-label="Added services">
+              {submission.result.added.map((item) => (
+                <li key={item.stableId}>{item.service.name}</li>
+              ))}
+            </ul>
+          ) : null}
+          {submission.result.skipped.length > 0 ? (
+            <ul aria-label="Server-skipped services">
+              {submission.result.skipped.map((item) => (
+                <li key={item.stableId}>
+                  <strong>{item.name}</strong>: {item.message}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      );
+      actions = (
+        <>
+          <button className="primary-button" type="button" disabled={locked} onClick={onScanAgain}>
+            Scan again
+          </button>
+          <button
+            ref={focusTargetRef}
+            className="secondary-button"
+            type="button"
+            disabled={locked}
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </>
+      );
+    } else if (submission.status === 'error') {
+      content = (
+        <div className="detection-state detection-error" role="alert">
+          {getErrorMessage(submission.error)}
+        </div>
+      );
+      actions = (
+        <>
+          <button
+            ref={focusTargetRef}
+            className="primary-button"
+            type="button"
+            disabled={locked}
+            onClick={onBack}
+          >
+            Back to review
+          </button>
+          <button className="secondary-button" type="button" disabled={locked} onClick={onClose}>
+            Close
+          </button>
+        </>
+      );
+    } else {
+      content = <div className="detection-state">Preparing service submission...</div>;
+      actions = null;
+    }
+  } else if (phase === 'confirm' && detection.status === 'success') {
+    content = (
+      <div className="detection-state">
+        <h3>Confirm detected services</h3>
+        <p>{plan.eligible.length} services eligible to add.</p>
+        <p>{plan.skipped.length} selected services omitted locally.</p>
+        <p>{plan.missingSelectedIds.length} selected services no longer present.</p>
+        <p>Only eligible services will be sent.</p>
+      </div>
+    );
+    actions = (
+      <>
+        <button className="secondary-button" type="button" disabled={locked} onClick={onBack}>
+          Back
+        </button>
+        <button
+          ref={focusTargetRef}
+          className="primary-button"
+          type="button"
+          disabled={locked || plan.eligible.length === 0}
+          onClick={onConfirm}
+        >
+          Add {plan.eligible.length} {plan.eligible.length === 1 ? 'service' : 'services'}
+        </button>
+        <button className="secondary-button" type="button" disabled={locked} onClick={onClose}>
+          Close
+        </button>
+      </>
+    );
+  } else if (detection.status === 'loading') {
     content = (
       <div className="detection-state" role="status" aria-live="polite">
         Scanning the project for services...
       </div>
     );
     actions = (
-      <button ref={focusTargetRef} className="secondary-button" type="button" onClick={onClose}>
+      <button
+        ref={focusTargetRef}
+        className="secondary-button"
+        type="button"
+        disabled={locked}
+        onClick={onClose}
+      >
         Close
       </button>
     );
@@ -65,12 +198,16 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
           ref={focusTargetRef}
           className="primary-button"
           type="button"
-          disabled={detection.isLoading}
-          onClick={() => void detection.retry()}
+          disabled={locked || detection.isLoading}
+          onClick={() => {
+            if (!locked) {
+              void detection.retry();
+            }
+          }}
         >
           Retry
         </button>
-        <button className="secondary-button" type="button" onClick={onClose}>
+        <button className="secondary-button" type="button" disabled={locked} onClick={onClose}>
           Close
         </button>
       </>
@@ -88,11 +225,12 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
           ref={focusTargetRef}
           className="primary-button"
           type="button"
-          onClick={() => void detection.scan()}
+          disabled={locked}
+          onClick={onScanAgain}
         >
           Scan again
         </button>
-        <button className="secondary-button" type="button" onClick={onClose}>
+        <button className="secondary-button" type="button" disabled={locked} onClick={onClose}>
           Close
         </button>
       </>
@@ -109,11 +247,25 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
               ref={focusTargetRef}
               className="secondary-button"
               type="button"
-              onClick={detection.selectAll}
+              disabled={locked}
+              onClick={() => {
+                if (!locked) {
+                  detection.selectAll();
+                }
+              }}
             >
               Select all
             </button>
-            <button className="secondary-button" type="button" onClick={detection.selectNone}>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={locked}
+              onClick={() => {
+                if (!locked) {
+                  detection.selectNone();
+                }
+              }}
+            >
               Select none
             </button>
           </div>
@@ -125,9 +277,22 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
               key={draft.stableId}
               draft={draft}
               selected={detection.selectedIds.has(draft.stableId)}
-              onToggle={detection.toggle}
-              onEdit={detection.edit}
-              onReset={detection.resetDraft}
+              disabled={locked}
+              onToggle={(stableId) => {
+                if (!locked) {
+                  detection.toggle(stableId);
+                }
+              }}
+              onEdit={(stableId, patch) => {
+                if (!locked) {
+                  detection.edit(stableId, patch);
+                }
+              }}
+              onReset={(stableId) => {
+                if (!locked) {
+                  detection.resetDraft(stableId);
+                }
+              }}
             />
           ))}
         </div>
@@ -136,10 +301,18 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
     );
     actions = (
       <>
-        <button className="primary-button" type="button" onClick={() => void detection.scan()}>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={locked || detection.selectedIds.size === 0}
+          onClick={onContinue}
+        >
+          Continue
+        </button>
+        <button className="secondary-button" type="button" disabled={locked} onClick={onScanAgain}>
           Scan again
         </button>
-        <button className="secondary-button" type="button" onClick={onClose}>
+        <button className="secondary-button" type="button" disabled={locked} onClick={onClose}>
           Close
         </button>
       </>
@@ -147,7 +320,13 @@ export function ServiceDetectionDialog({ detection, onClose }: ServiceDetectionD
   } else {
     content = <div className="detection-state">Preparing service detection...</div>;
     actions = (
-      <button ref={focusTargetRef} className="secondary-button" type="button" onClick={onClose}>
+      <button
+        ref={focusTargetRef}
+        className="secondary-button"
+        type="button"
+        disabled={locked}
+        onClick={onClose}
+      >
         Close
       </button>
     );

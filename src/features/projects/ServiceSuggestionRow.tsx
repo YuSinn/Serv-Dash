@@ -46,6 +46,7 @@ export function DetectionWarnings({ warnings, label }: DetectionWarningsProps) {
 interface ServiceSuggestionRowProps {
   draft: DetectionDraft;
   selected: boolean;
+  disabled: boolean;
   onToggle: (stableId: string) => void;
   onEdit: (stableId: string, patch: DetectionDraftPatch) => void;
   onReset: (stableId: string) => void;
@@ -54,6 +55,7 @@ interface ServiceSuggestionRowProps {
 export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
   draft,
   selected,
+  disabled,
   onToggle,
   onEdit,
   onReset,
@@ -76,7 +78,7 @@ export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
             id={`${id}-selected`}
             type="checkbox"
             checked={selected}
-            disabled={draft.matchesRegisteredService}
+            disabled={disabled || draft.matchesRegisteredService}
             onChange={() => onToggle(draft.stableId)}
           />
           <span>Select {draft.displayName}</span>
@@ -105,6 +107,7 @@ export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
             type="text"
             maxLength={121}
             value={draft.displayName}
+            disabled={disabled}
             aria-invalid={Boolean(errors.displayName)}
             aria-describedby={errors.displayName ? displayNameErrorId : undefined}
             onChange={(event) => onEdit(draft.stableId, { displayName: event.target.value })}
@@ -121,6 +124,7 @@ export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
           <input
             type="text"
             value={draft.workingDirectory}
+            disabled={disabled}
             spellCheck={false}
             aria-invalid={Boolean(errors.workingDirectory)}
             aria-describedby={errors.workingDirectory ? workingDirectoryErrorId : undefined}
@@ -139,6 +143,7 @@ export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
             rows={2}
             maxLength={4097}
             value={draft.command}
+            disabled={disabled}
             spellCheck={false}
             aria-invalid={Boolean(errors.command)}
             aria-describedby={errors.command ? commandErrorId : undefined}
@@ -157,6 +162,7 @@ export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
       <button
         className="secondary-button detection-reset-button"
         type="button"
+        disabled={disabled}
         onClick={() => onReset(draft.stableId)}
       >
         Reset

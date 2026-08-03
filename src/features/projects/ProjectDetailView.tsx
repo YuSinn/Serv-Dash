@@ -172,7 +172,13 @@ export function ProjectDetailView({
           >
             Open root folder
           </button>
-          <ServiceDetectionControl projectId={project.id} />
+          <ServiceDetectionControl
+            key={project.id}
+            projectId={project.id}
+            services={controller.services}
+            submission={controller.detectedSubmission}
+            isBusy={controller.isLoading || isPersistenceBusy}
+          />
           <button
             className="primary-button"
             type="button"

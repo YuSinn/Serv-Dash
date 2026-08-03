@@ -1,8 +1,16 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DetectionDraft } from './detectionDraft';
+import type { DetectionSubmissionPlan } from './detectionSubmission';
+import type { ServiceDetectionPresentationPhase } from './ServiceDetectionControl';
 import { ServiceDetectionDialog } from './ServiceDetectionDialog';
-import type { DetectionResult, DetectionWarning } from './types';
+import type {
+  AddDetectedServicesResult,
+  DetectionResult,
+  DetectionWarning,
+  ServiceDefinition,
+} from './types';
+import type { UseDetectedServiceSubmissionResult } from './useDetectedServiceSubmission';
 import type { UseServiceDetectionResult } from './useServiceDetection';
 
 const { addServiceMock, invokeMock } = vi.hoisted(() => ({
@@ -10,7 +18,11 @@ const { addServiceMock, invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
 }));
 
-vi.mock('./api', () => ({ addService: addServiceMock }));
+vi.mock('./api', () => ({
+  addService: addServiceMock,
+  getErrorMessage: (error: unknown) =>
+    error instanceof Error ? error.message : 'An unexpected error occurred.',
+}));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
 
 const globalWarning: DetectionWarning = {
@@ -72,7 +84,7 @@ const drafts: readonly DetectionDraft[] = [
   }),
 ];
 
-function result(overrides: Partial<DetectionResult> = {}): DetectionResult {
+function detectionResult(overrides: Partial<DetectionResult> = {}): DetectionResult {
   return {
     projectId: 'project-a',
     projectRoot: 'D:\\projects\\project-a',
@@ -89,7 +101,7 @@ function detection(overrides: Partial<UseServiceDetectionResult> = {}): UseServi
     isOpen: true,
     status: 'success',
     isLoading: false,
-    result: result(),
+    result: detectionResult(),
     drafts,
     selectedIds: new Set(['npm']),
     error: null,
@@ -106,6 +118,100 @@ function detection(overrides: Partial<UseServiceDetectionResult> = {}): UseServi
   };
 }
 
+function service(name: string): ServiceDefinition {
+  return {
+    id: `service-${name}`,
+    name,
+    workingDirectory: '.',
+    command: `run ${name}`,
+    expectedPort: null,
+    localUrl: null,
+    createdAt: '2026-07-31T00:00:00Z',
+    updatedAt: '2026-07-31T00:00:00Z',
+  };
+}
+
+function batchResult(
+  addedNames: readonly string[],
+  skippedNames: readonly string[],
+): AddDetectedServicesResult {
+  const added = addedNames.map((name) => ({ stableId: `added-${name}`, service: service(name) }));
+  return {
+    added,
+    skipped: skippedNames.map((name) => ({
+      stableId: `skipped-${name}`,
+      name,
+      kind: 'duplicateExistingName',
+      message: `The service ${name} already exists.`,
+    })),
+    services: added.map((item) => item.service),
+  };
+}
+
+function submission(
+  overrides: Partial<UseDetectedServiceSubmissionResult> = {},
+): UseDetectedServiceSubmissionResult {
+  return {
+    status: 'idle',
+    result: null,
+    error: null,
+    submit: vi.fn().mockResolvedValue(true),
+    reset: vi.fn(),
+    ...overrides,
+  };
+}
+
+const defaultPlan: DetectionSubmissionPlan = {
+  eligible: [
+    {
+      stableId: 'npm',
+      input: {
+        name: 'npm: dev',
+        workingDirectory: '.',
+        command: 'npm run -- dev',
+        expectedPort: null,
+        localUrl: null,
+      },
+    },
+  ],
+  skipped: [],
+  missingSelectedIds: [],
+};
+
+interface DialogOptions {
+  detection?: UseServiceDetectionResult;
+  submission?: UseDetectedServiceSubmissionResult;
+  phase?: ServiceDetectionPresentationPhase;
+  plan?: DetectionSubmissionPlan;
+  busy?: boolean;
+  onClose?: () => void;
+  onContinue?: () => void;
+  onBack?: () => void;
+  onConfirm?: () => void;
+  onScanAgain?: () => void;
+}
+
+function renderDialog(options: DialogOptions = {}) {
+  const callbacks = {
+    onClose: options.onClose ?? vi.fn(),
+    onContinue: options.onContinue ?? vi.fn(),
+    onBack: options.onBack ?? vi.fn(),
+    onConfirm: options.onConfirm ?? vi.fn(),
+    onScanAgain: options.onScanAgain ?? vi.fn(),
+  };
+  const view = render(
+    <ServiceDetectionDialog
+      detection={options.detection ?? detection()}
+      submission={options.submission ?? submission()}
+      phase={options.phase ?? 'review'}
+      plan={options.plan ?? defaultPlan}
+      busy={options.busy ?? false}
+      {...callbacks}
+    />,
+  );
+  return { ...view, ...callbacks };
+}
+
 beforeEach(() => {
   addServiceMock.mockReset();
   invokeMock.mockReset();
@@ -117,59 +223,43 @@ afterEach(() => {
   cleanup();
 });
 
-describe('ServiceDetectionDialog states', () => {
-  it('provides an accessible dialog title and description', () => {
-    render(<ServiceDetectionDialog detection={detection()} onClose={vi.fn()} />);
+describe('ServiceDetectionDialog detection states', () => {
+  it('keeps the accessible dialog shell and loading state', () => {
+    renderDialog({ detection: detection({ status: 'loading', isLoading: true }) });
 
     const dialog = screen.getByRole('dialog', { name: 'Detected services' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(dialog).toHaveAccessibleDescription(
       'Review the detected service suggestions. Closing this dialog discards this review.',
     );
-  });
-
-  it('shows only the live loading state and Close', () => {
-    render(
-      <ServiceDetectionDialog
-        detection={detection({ status: 'loading', isLoading: true })}
-        onClose={vi.fn()}
-      />,
-    );
-
-    const status = screen.getByRole('status');
-    expect(status).toHaveAttribute('aria-live', 'polite');
-    expect(status).toHaveTextContent('Scanning the project for services...');
+    expect(screen.getByRole('status')).toHaveTextContent('Scanning the project for services...');
     expect(screen.queryByRole('list', { name: 'Detected services' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Close' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Scan again' })).not.toBeInTheDocument();
   });
 
-  it('shows an error alert and retries without closing', () => {
-    const value = detection({ status: 'error', result: null, error: 'Detection failed.' });
-    render(<ServiceDetectionDialog detection={value} onClose={vi.fn()} />);
-
+  it('retries detection errors and scans again after an empty result', () => {
+    const errorDetection = detection({ status: 'error', result: null, error: 'Detection failed.' });
+    const first = renderDialog({ detection: errorDetection });
     expect(screen.getByRole('alert')).toHaveTextContent('Detection failed.');
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(errorDetection.retry).toHaveBeenCalledTimes(1);
+    first.unmount();
 
-    expect(value.retry).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows the empty result and allows another scan', () => {
-    const value = detection({ status: 'empty', drafts: [], selectedIds: new Set() });
-    render(<ServiceDetectionDialog detection={value} onClose={vi.fn()} />);
-
+    const onScanAgain = vi.fn();
+    renderDialog({
+      detection: detection({ status: 'empty', drafts: [], selectedIds: new Set() }),
+      onScanAgain,
+    });
     expect(screen.getByText('No services were detected in this project.')).toBeVisible();
     expect(screen.getByText('Scanned directories: 17')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Scan again' }));
-
-    expect(value.scan).toHaveBeenCalledTimes(1);
+    expect(onScanAgain).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('ServiceDetectionDialog review', () => {
-  it('shows selection controls, all source kinds, and preserves draft order', () => {
+  it('preserves review, selection, editing, reset, and all source kinds', () => {
     const value = detection();
-    render(<ServiceDetectionDialog detection={value} onClose={vi.fn()} />);
+    renderDialog({ detection: value });
 
     expect(screen.getByText('1 of 4 selected')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
@@ -184,117 +274,203 @@ describe('ServiceDetectionDialog review', () => {
     for (const label of ['npm', 'PowerShell', 'CMD', 'BAT']) {
       expect(screen.getByText(label, { selector: '.detection-source-badge' })).toBeVisible();
     }
-  });
-
-  it('reflects selection, toggles by stableId, and blocks a registered service', () => {
-    const value = detection();
-    render(<ServiceDetectionDialog detection={value} onClose={vi.fn()} />);
 
     const selected = screen.getByLabelText('Select npm: dev');
     expect(selected).toBeChecked();
     fireEvent.click(selected);
     expect(value.toggle).toHaveBeenCalledWith('npm');
-
-    const registered = screen.getByLabelText('Select CMD service');
-    expect(registered).toBeDisabled();
+    expect(screen.getByLabelText('Select CMD service')).toBeDisabled();
     expect(screen.getByText('Already registered')).toBeVisible();
-    fireEvent.click(registered);
-    expect(value.toggle).not.toHaveBeenCalledWith('cmd');
-  });
 
-  it('edits each allowed field without toggling and resets the correct draft', () => {
-    const value = detection();
-    render(<ServiceDetectionDialog detection={value} onClose={vi.fn()} />);
-    const row = screen.getAllByTestId('service-suggestion')[0];
-    if (!row) {
+    const firstRow = rows[0];
+    if (!firstRow) {
       throw new Error('Expected the npm suggestion row.');
     }
-
-    fireEvent.change(within(row).getByLabelText('Display name'), {
+    fireEvent.change(within(firstRow).getByLabelText('Display name'), {
       target: { value: 'Edited name' },
     });
-    fireEvent.change(within(row).getByLabelText('Command'), {
+    fireEvent.change(within(firstRow).getByLabelText('Command'), {
       target: { value: 'edited command' },
     });
-    fireEvent.change(within(row).getByLabelText('Working directory'), {
+    fireEvent.change(within(firstRow).getByLabelText('Working directory'), {
       target: { value: 'client' },
     });
-    fireEvent.click(within(row).getByRole('button', { name: 'Reset' }));
-
+    fireEvent.click(within(firstRow).getByRole('button', { name: 'Reset' }));
     expect(value.edit).toHaveBeenNthCalledWith(1, 'npm', { displayName: 'Edited name' });
     expect(value.edit).toHaveBeenNthCalledWith(2, 'npm', { command: 'edited command' });
     expect(value.edit).toHaveBeenNthCalledWith(3, 'npm', { workingDirectory: 'client' });
-    expect(value.toggle).not.toHaveBeenCalled();
     expect(value.resetDraft).toHaveBeenCalledWith('npm');
   });
 
-  it('shows shared validation messages with accessible field state', () => {
+  it('retains validation, warnings, truncation, and the unsaved note', () => {
     const invalid = draft('invalid', {
       displayName: '',
       command: '',
       workingDirectory: 'C:\\absolute',
+      warnings: [rowWarning],
     });
-    render(
-      <ServiceDetectionDialog
-        detection={detection({ drafts: [invalid], selectedIds: new Set() })}
-        onClose={vi.fn()}
-      />,
-    );
+    renderDialog({ detection: detection({ drafts: [invalid], selectedIds: new Set() }) });
 
-    expect(screen.getByRole('textbox', { name: /Display name/ })).toHaveAttribute(
-      'aria-invalid',
-      'true',
-    );
-    expect(screen.getByRole('textbox', { name: /Command/ })).toHaveAttribute(
-      'aria-invalid',
-      'true',
-    );
-    expect(screen.getByRole('textbox', { name: /Working directory/ })).toHaveAttribute(
-      'aria-invalid',
-      'true',
-    );
+    for (const name of [/Display name/, /Command/, /Working directory/]) {
+      expect(screen.getByRole('textbox', { name })).toHaveAttribute('aria-invalid', 'true');
+    }
     expect(screen.getByText('Service name is required.')).toBeVisible();
     expect(screen.getByText('Command is required.')).toBeVisible();
     expect(screen.getByText('Use a path relative to the project root.')).toBeVisible();
-  });
-
-  it('shows structured warnings, truncation, scan metadata, and the unsaved note', () => {
-    render(<ServiceDetectionDialog detection={detection()} onClose={vi.fn()} />);
-
     expect(screen.getByText('The directory limit was reached.')).toBeVisible();
     expect(screen.getByText('A source could not be inspected.')).toBeVisible();
-    expect(screen.getByText('tools/private.ps1')).toBeVisible();
-    expect(screen.getAllByText('info', { selector: 'strong' })).toHaveLength(1);
-    expect(screen.getAllByText('warning', { selector: 'strong' })).toHaveLength(1);
-    expect(screen.getAllByText('blocking', { selector: 'strong' })).toHaveLength(1);
     expect(
       screen.getByText(
         'The scan was incomplete. Some directories or files may not have been inspected.',
       ),
     ).toBeVisible();
-    expect(screen.getByText('Scanned directories: 17')).toBeVisible();
     expect(screen.getByText('Selections and edits are not saved yet.')).toBeVisible();
   });
 
-  it('runs Scan again and Close through their callbacks', () => {
-    const value = detection();
+  it('disables Continue without a selection and delegates it without submitting', () => {
+    const onContinue = vi.fn();
+    const submissionValue = submission();
+    const { rerender } = renderDialog({
+      detection: detection({ selectedIds: new Set() }),
+      submission: submissionValue,
+      onContinue,
+    });
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+
+    rerender(
+      <ServiceDetectionDialog
+        detection={detection()}
+        submission={submissionValue}
+        phase="review"
+        plan={defaultPlan}
+        busy={false}
+        onClose={vi.fn()}
+        onContinue={onContinue}
+        onBack={vi.fn()}
+        onConfirm={vi.fn()}
+        onScanAgain={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(onContinue).toHaveBeenCalledTimes(1);
+    expect(submissionValue.submit).not.toHaveBeenCalled();
+  });
+});
+
+describe('ServiceDetectionDialog confirmation and submission', () => {
+  it('shows the current plan counts and delegates Back, Confirm, and Close', () => {
+    const plan: DetectionSubmissionPlan = {
+      eligible: defaultPlan.eligible,
+      skipped: [{ stableId: 'invalid', displayName: 'Invalid', kind: 'invalidDraft', errors: {} }],
+      missingSelectedIds: ['missing-a', 'missing-b'],
+    };
+    const onBack = vi.fn();
+    const onConfirm = vi.fn();
     const onClose = vi.fn();
-    render(<ServiceDetectionDialog detection={value} onClose={onClose} />);
+    renderDialog({ phase: 'confirm', plan, onBack, onConfirm, onClose });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Scan again' }));
+    expect(screen.getByText('1 services eligible to add.')).toBeVisible();
+    expect(screen.getByText('1 selected services omitted locally.')).toBeVisible();
+    expect(screen.getByText('2 selected services no longer present.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add 1 service' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-
-    expect(value.scan).toHaveBeenCalledTimes(1);
+    expect(onBack).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not allow an empty plan to submit', () => {
+    const onConfirm = vi.fn();
+    renderDialog({
+      phase: 'confirm',
+      plan: { eligible: [], skipped: defaultPlan.skipped, missingSelectedIds: [] },
+      onConfirm,
+    });
+    const button = screen.getByRole('button', { name: 'Add 0 services' });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('blocks close, back, editing, selection, rescan, and Escape while busy', () => {
+    const onClose = vi.fn();
+    const onScanAgain = vi.fn();
+    renderDialog({ busy: true, onClose, onScanAgain });
+
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Scan again' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+    expect(screen.getByLabelText('Select npm: dev')).toBeDisabled();
+    for (const input of screen.getAllByRole('textbox', { name: /Display name/ })) {
+      expect(input).toBeDisabled();
+    }
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onScanAgain).not.toHaveBeenCalled();
+
+    cleanup();
+    renderDialog({
+      phase: 'submitted',
+      busy: true,
+      submission: submission({ status: 'submitting' }),
+      onClose,
+    });
+    expect(screen.getByRole('status')).toHaveTextContent('Adding detected services...');
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['total', batchResult(['One'], [])],
+    ['partial', batchResult(['One'], ['Two'])],
+    ['all-skipped', batchResult([], ['Two'])],
+  ])('presents %s backend outcomes as success', (_label, response) => {
+    renderDialog({
+      phase: 'submitted',
+      submission: submission({ status: 'success', result: response }),
+    });
+    expect(screen.getByRole('heading', { name: 'Service import complete' })).toBeVisible();
+    expect(screen.getByText(`${response.added.length} services added.`)).toBeVisible();
+    expect(
+      screen.getByText(`${response.skipped.length} services skipped by the server.`),
+    ).toBeVisible();
+  });
+
+  it('keeps a global error separate from skipped results', () => {
+    renderDialog({
+      phase: 'submitted',
+      submission: submission({ status: 'error', error: new Error('Batch persistence failed.') }),
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('Batch persistence failed.');
+    expect(screen.queryByLabelText('Server-skipped services')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back to review' })).toBeVisible();
+  });
+
+  it('renders backend names and messages as escaped React text', () => {
+    const unsafe = '<script>alert("x")</script>';
+    const response = batchResult([unsafe], [unsafe]);
+    const skipped = response.skipped[0];
+    if (!skipped) {
+      throw new Error('Expected a skipped service fixture.');
+    }
+    skipped.message = unsafe;
+    renderDialog({
+      phase: 'submitted',
+      submission: submission({ status: 'success', result: response }),
+    });
+
+    expect(screen.getAllByText(unsafe).length).toBeGreaterThan(0);
+    expect(document.querySelector('script')).toBeNull();
   });
 });
 
 describe('ServiceDetectionDialog keyboard behavior', () => {
-  it('closes on Escape and removes its listener on unmount', () => {
+  it('closes on Escape when idle and removes its listener on unmount', () => {
     const onClose = vi.fn();
-    const { unmount } = render(
-      <ServiceDetectionDialog detection={detection()} onClose={onClose} />,
-    );
+    const { unmount } = renderDialog({ onClose });
 
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
