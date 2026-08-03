@@ -81,7 +81,7 @@ export function ServiceDetectionDialog({
       if (elements.length === 0) {
         event.preventDefault();
         event.stopPropagation();
-        (focusTargetRef.current ?? dialogRef.current).focus();
+        focusTargetRef.current?.focus();
         return;
       }
 
@@ -124,7 +124,7 @@ export function ServiceDetectionDialog({
       content = (
         <div
           ref={setFocusTarget}
-          className="detection-state"
+          className="detection-state detection-progress"
           role="status"
           aria-live="polite"
           tabIndex={-1}
@@ -135,21 +135,27 @@ export function ServiceDetectionDialog({
       actions = null;
     } else if (submission.status === 'success' && submission.result) {
       content = (
-        <div className="detection-state" role="status">
+        <div className="detection-state detection-result" role="status">
           <h3 ref={setFocusTarget} tabIndex={-1}>
             Service import complete
           </h3>
           <p>{countLabel(submission.result.added.length, 'service')} added.</p>
           <p>{countLabel(submission.result.skipped.length, 'service')} skipped by the server.</p>
           {submission.result.added.length > 0 ? (
-            <ul aria-label="Added services">
+            <ul
+              className="detection-result-list detection-result-list--added"
+              aria-label="Added services"
+            >
               {submission.result.added.map((item) => (
                 <li key={item.stableId}>{item.service.name}</li>
               ))}
             </ul>
           ) : null}
           {submission.result.skipped.length > 0 ? (
-            <ul aria-label="Server-skipped services">
+            <ul
+              className="detection-result-list detection-result-list--skipped"
+              aria-label="Server-skipped services"
+            >
               {submission.result.skipped.map((item) => (
                 <li key={item.stableId}>
                   <strong>{item.name}</strong>: {item.message}
@@ -194,7 +200,7 @@ export function ServiceDetectionDialog({
       content = (
         <div
           ref={setFocusTarget}
-          className="detection-state"
+          className="detection-state detection-progress"
           role="status"
           aria-live="polite"
           tabIndex={-1}
@@ -206,13 +212,21 @@ export function ServiceDetectionDialog({
     }
   } else if (phase === 'confirm' && detection.status === 'success') {
     content = (
-      <div className="detection-state">
+      <div className="detection-state detection-confirmation">
         <h3 ref={setFocusTarget} tabIndex={-1}>
           Confirm detected services
         </h3>
-        <p>{countLabel(plan.eligible.length, 'service')} eligible to add.</p>
-        <p>{countLabel(plan.skipped.length, 'selected service')} omitted locally.</p>
-        <p>{countLabel(plan.missingSelectedIds.length, 'selection')} no longer present.</p>
+        <div className="detection-confirmation-counts">
+          <p className="detection-confirmation-count detection-confirmation-count--eligible">
+            {countLabel(plan.eligible.length, 'service')} eligible to add.
+          </p>
+          <p className="detection-confirmation-count">
+            {countLabel(plan.skipped.length, 'selected service')} omitted locally.
+          </p>
+          <p className="detection-confirmation-count">
+            {countLabel(plan.missingSelectedIds.length, 'selection')} no longer present.
+          </p>
+        </div>
         <p>Only eligible services will be sent.</p>
       </div>
     );
@@ -227,7 +241,7 @@ export function ServiceDetectionDialog({
           disabled={locked || plan.eligible.length === 0}
           onClick={onConfirm}
         >
-          Add {plan.eligible.length} {plan.eligible.length === 1 ? 'service' : 'services'}
+          Add {countLabel(plan.eligible.length, 'service')}
         </button>
         <button className="secondary-button" type="button" disabled={locked} onClick={onClose}>
           Close
@@ -238,7 +252,7 @@ export function ServiceDetectionDialog({
     content = (
       <div
         ref={setFocusTarget}
-        className="detection-state"
+        className="detection-state detection-progress"
         role="status"
         aria-live="polite"
         tabIndex={-1}
@@ -383,7 +397,7 @@ export function ServiceDetectionDialog({
     content = (
       <div
         ref={setFocusTarget}
-        className="detection-state"
+        className="detection-state detection-progress"
         role="status"
         aria-live="polite"
         tabIndex={-1}

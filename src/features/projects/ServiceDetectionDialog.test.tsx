@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DetectionDraft } from './detectionDraft';
 import type { DetectionSubmissionPlan } from './detectionSubmission';
@@ -270,6 +271,8 @@ describe('ServiceDetectionDialog review', () => {
     expect(value.selectNone).toHaveBeenCalledTimes(1);
 
     const rows = screen.getAllByTestId('service-suggestion');
+    expect(rows[0]).toHaveClass('detection-suggestion--selected');
+    expect(rows[2]).toHaveClass('detection-suggestion--registered');
     expect(
       rows.map((row) => (within(row).getByLabelText('Display name') as HTMLInputElement).value),
     ).toEqual(['npm: dev', 'PowerShell service', 'CMD service', 'BAT service']);
@@ -374,6 +377,12 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
     expect(screen.getByText('1 service eligible to add.')).toBeVisible();
     expect(screen.getByText('1 selected service omitted locally.')).toBeVisible();
     expect(screen.getByText('2 selections no longer present.')).toBeVisible();
+    expect(
+      screen.getByRole('heading', { name: 'Confirm detected services' }).parentElement,
+    ).toHaveClass('detection-confirmation');
+    expect(screen.getByText('1 service eligible to add.').parentElement).toHaveClass(
+      'detection-confirmation-counts',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add 1 service' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -416,8 +425,13 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
     expect(
       screen.getByText(`${count} ${count === 1 ? 'selection' : 'selections'} no longer present.`),
     ).toBeVisible();
+    expect(
+      screen.getByRole('button', {
+        name: `Add ${count} ${count === 1 ? 'service' : 'services'}`,
+      }),
+    ).toBeVisible();
     if (count === 1) {
-      expect(screen.queryByText(/1 services|1 selections/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/1 services|1 selections|Add 1 services/)).not.toBeInTheDocument();
     }
   });
 
@@ -497,10 +511,14 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
       ),
     ).toBeVisible();
     if (response.added.length > 0) {
-      expect(screen.getByRole('list', { name: 'Added services' })).toBeVisible();
+      expect(screen.getByRole('list', { name: 'Added services' })).toHaveClass(
+        'detection-result-list--added',
+      );
     }
     if (response.skipped.length > 0) {
-      expect(screen.getByRole('list', { name: 'Server-skipped services' })).toBeVisible();
+      expect(screen.getByRole('list', { name: 'Server-skipped services' })).toHaveClass(
+        'detection-result-list--skipped',
+      );
     }
   });
 
@@ -543,6 +561,26 @@ describe('ServiceDetectionDialog confirmation and submission', () => {
     });
 
     expect(screen.getAllByText(unsafe).length).toBeGreaterThan(0);
+    expect(document.querySelector('script')).toBeNull();
+  });
+
+  it('keeps long review content inside the semantic suggestion row', () => {
+    const long = `Unicode service ${'路'.repeat(80)}<script>not markup</script>`;
+    const longDraft = draft('long', {
+      displayName: long,
+      sourcePath: `src/${'segment'.repeat(80)}`,
+      command: `run-${'x'.repeat(300)}`,
+      workingDirectory: `packages/${'nested'.repeat(80)}`,
+      warnings: [{ ...rowWarning, message: long, path: long }],
+    });
+    renderDialog({
+      detection: detection({ drafts: [longDraft], selectedIds: new Set(['long']) }),
+    });
+
+    const row = screen.getByTestId('service-suggestion');
+    expect(row).toHaveClass('detection-suggestion--selected');
+    expect(row).toContainElement(screen.getByDisplayValue(long));
+    expect(row).toContainElement(screen.getByDisplayValue(longDraft.command));
     expect(document.querySelector('script')).toBeNull();
   });
 });
@@ -728,5 +766,61 @@ describe('ServiceDetectionDialog keyboard behavior', () => {
     expect(background).toHaveFocus();
     expect(onClose).toHaveBeenCalledTimes(1);
     background.remove();
+  });
+
+  it('keeps one keyboard lifecycle and focus trap under React StrictMode', () => {
+    const onClose = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const callbacks = {
+      onClose,
+      onContinue: vi.fn(),
+      onBack: vi.fn(),
+      onConfirm: vi.fn(),
+      onScanAgain: vi.fn(),
+    };
+    const view = render(
+      <StrictMode>
+        <ServiceDetectionDialog
+          detection={detection()}
+          submission={submission()}
+          phase="review"
+          plan={defaultPlan}
+          busy={false}
+          {...callbacks}
+        />
+      </StrictMode>,
+    );
+
+    const dialog = screen.getByRole('dialog');
+    const first = screen.getByRole('button', { name: 'Select all' });
+    const last = screen.getByRole('button', { name: 'Close' });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    last.focus();
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    window.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(first).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+    const background = document.createElement('button');
+    document.body.append(background);
+    background.focus();
+    const afterUnmountTab = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(afterUnmountTab);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(afterUnmountTab.defaultPrevented).toBe(false);
+    expect(background).toHaveFocus();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(consoleError).not.toHaveBeenCalled();
+    background.remove();
+    consoleError.mockRestore();
   });
 });

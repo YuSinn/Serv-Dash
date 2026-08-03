@@ -68,7 +68,7 @@ export const ServiceSuggestionRow = memo(function ServiceSuggestionRow({
 
   return (
     <article
-      className={`detection-suggestion${draft.matchesRegisteredService ? ' detection-suggestion--registered' : ''}`}
+      className={`detection-suggestion${selected ? ' detection-suggestion--selected' : ''}${draft.matchesRegisteredService ? ' detection-suggestion--registered' : ''}`}
       data-testid="service-suggestion"
       role="listitem"
     >

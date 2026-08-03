@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import type { ComponentProps } from 'react';
+import { StrictMode, type ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DetectionDraft } from './detectionDraft';
 import { ServiceDetectionControl } from './ServiceDetectionControl';
@@ -266,6 +266,78 @@ describe('ServiceDetectionControl', () => {
     expect(submission.reset).toHaveBeenCalledTimes(1);
     expect(detection.close).toHaveBeenCalledTimes(1);
     expect(trigger).toHaveFocus();
+  });
+
+  it('does not restore focus to a trigger disabled before the close microtask', async () => {
+    const submission = submissionState();
+    let currentDetection = detectionState({ isOpen: true, status: 'empty', result: result() });
+    useServiceDetectionMock.mockImplementation(() => currentDetection);
+    const view = render(
+      <ServiceDetectionControl
+        projectId="project-a"
+        services={[]}
+        submission={submission}
+        isBusy={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    currentDetection = detectionState();
+    view.rerender(
+      <ServiceDetectionControl
+        projectId="project-a"
+        services={[]}
+        submission={submission}
+        isBusy
+      />,
+    );
+    const trigger = screen.getByRole('button', { name: 'Detect services' });
+    expect(trigger).toBeDisabled();
+
+    await act(async () => Promise.resolve());
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(trigger).not.toHaveFocus();
+  });
+
+  it('keeps dialog focus and restores the current trigger under React StrictMode', async () => {
+    const submission = submissionState();
+    let currentDetection = detectionState({ isOpen: true, status: 'empty', result: result() });
+    useServiceDetectionMock.mockImplementation(() => currentDetection);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const view = render(
+      <StrictMode>
+        <ServiceDetectionControl
+          projectId="project-a"
+          services={[]}
+          submission={submission}
+          isBusy={false}
+        />
+      </StrictMode>,
+    );
+
+    const trigger = screen.getByRole('button', { name: 'Detect services' });
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(trigger).not.toHaveFocus();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    currentDetection = detectionState();
+    view.rerender(
+      <StrictMode>
+        <ServiceDetectionControl
+          projectId="project-a"
+          services={[]}
+          submission={submission}
+          isBusy={false}
+        />
+      </StrictMode>,
+    );
+    await act(async () => Promise.resolve());
+
+    expect(trigger).toHaveFocus();
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 
   it('returns focus after Escape without targeting an obsolete project trigger', async () => {
